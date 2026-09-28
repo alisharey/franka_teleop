@@ -1,0 +1,54 @@
+# Copy this file to config/teleop.conf and replace every REQUIRED value using
+# the qualified operator's approved setup values. This example is deliberately
+# not valid for robot motion.
+
+# FCI address of the robot. Do not use a Desk-only endpoint.
+robot_ip = REQUIRED
+
+# Stable controller path from /dev/input/by-id. Confirm it with controller_probe.
+joystick_path = /dev/input/by-id/usb-Microsoft_Android-joystick
+
+# The detected Microsoft Android controller uses this fixed Xbox-style profile:
+# Physical RB (Linux button 7) is deadman; right stick vertical is X; left stick is Y/Z; L1 or L2 switches the
+# sticks into rotation mode; A opens and B closes the parallel gripper.
+controller_profile = xbox_android_standard
+deadzone = REQUIRED
+
+# Base-frame Cartesian velocity limits. No values are supplied by this project.
+max_linear_speed_m_s = REQUIRED
+max_angular_speed_rad_s = REQUIRED
+# Every velocity change is explicitly rate-limited before it is sent to FCI.
+max_linear_acceleration_m_s2 = 1.0
+max_linear_jerk_m_s3 = 10.0
+max_angular_acceleration_rad_s2 = 2.5
+max_angular_jerk_rad_s3 = 25.0
+initial_zero_hold_s = 0.10
+
+# Fixed workspace in the robot base frame O ([min, max] metres per axis), the
+# same box as Frankastein configs/robots/fr3.yaml. The tool refuses to start
+# with the gripper outside it and slows motion near each wall so the arm stops
+# about 2 cm inside the boundary.
+workspace_x_m = 0.27, 0.76
+workspace_y_m = -0.39, 0.36
+workspace_z_m = 0.0, 0.71
+# Downward Z speed as a fraction of max_linear_speed_m_s (Frankastein: 0.5).
+z_down_speed_scale = 0.5
+# D-pad vertical axis index (confirm with controller_probe); up = faster
+# (max 100%), down = slower (50%, 25%).
+speed_toggle_axis = 7
+
+# This tool deliberately preserves Franka Desk's active collision behavior; it
+# never raises or lowers those thresholds.
+
+# Releasing the deadman pauses arm motion; a joystick fault ends it. These gripper
+# values match Frankastein's keyboard teleop.
+input_timeout_ms = 250
+gripper_enabled = true
+gripper_open_width_m = 0.08
+gripper_open_speed_m_s = 0.08
+gripper_grasp_width_m = 0.0
+gripper_grasp_speed_m_s = 0.03
+gripper_grasp_force_N = 50.0
+# The wide outer tolerance lets a grasp on any object succeed (Frankastein).
+gripper_grasp_epsilon_inner_m = 0.005
+gripper_grasp_epsilon_outer_m = 0.08
