@@ -1,16 +1,38 @@
 # Franka gamepad teleoperation
 
-Standalone, conservative Cartesian-velocity teleoperation for a Franka arm with the parallel gripper. It does not modify or depend on `Franka-SM` at runtime.
+Standalone gamepad teleoperation for a Franka FR3 with the parallel gripper. The sticks command a Cartesian velocity of the gripper; an onboard differential-IK solver turns that into joint velocities at 1 kHz. It does not modify or depend on `Franka-SM` at runtime.
+
+## How motion is computed
+
+Each 1 ms control tick:
+
+1. **Sticks → twist.** Stick deflection gives a base-frame Cartesian velocity (linear and, with L1/L2 held, angular), clamped so the gripper can always stop before the workspace walls.
+2. **Cartesian S-curve.** The twist is shaped with jerk-limited acceleration so stick steps never cause overshoot or ringing.
+3. **IK solver** (`src/diff_ik.h`, the approach DROID uses, in C++):
+   - damped least squares, with damping only near singular poses;
+   - per-joint velocity bounds from the robot's own position-dependent limits (`Robot::getUpper/LowerJointVelocityLimits`), evaluated 0.05 rad early and capped at 1 rad/s. A joint that reaches its bound is frozen there and the others are re-solved to keep the gripper on course (saturation in the null space);
+   - while the sticks move, a gentle pull of the elbow toward Franka's ready pose and away from joint limits, which does not move the gripper.
+4. **Fence on actual motion.** The resulting gripper motion (including any detour, below) is checked against the workspace box again, and the arm never moves against the push.
+5. **Joint S-curve, then libfranka's rate limiter** with the robot's exact velocity, acceleration and jerk limits as the final safety clip.
+
+The robot runs its joint impedance controller (`ControllerMode::kJointImpedance`).
+
+**Reachability.** Some pushed directions are geometrically impossible from some poses with the gripper pointing down. For example, straight down from the home pose needs the elbow (joint 4) to fold past its limit, and low near the base only moving away from the base is possible. `allow_detour` in the config decides what happens then:
+
+- `true` (default): the arm swings off the pushed line as needed to keep making progress (the descent from home to the table detours about 10 cm forward and takes about 11 s);
+- `false`: the arm keeps the exact direction and slows or stops instead.
+
+Either way the gripper stays inside the workspace box and never moves against the push.
 
 ## Safety model
 
 - `controller_probe` is input-only and cannot connect to the robot.
-- The supplied configuration uses a fixed workspace box in the robot base frame (x 0.27–0.76 m, y −0.39–0.36 m, z 0.00–0.71 m; Frankastein's `configs/robots/fr3.yaml` box with z lowered from 0.06 to 0). The program refuses to start with the gripper outside it and slows motion near each wall so the arm stops about 2 cm inside the boundary. Franka Desk's active collision settings are preserved.
+- The supplied configuration uses a fixed workspace box in the robot base frame (`workspace_*_m` in `config/teleop.conf`). The program refuses to start with the gripper outside it and slows motion near each wall so the arm stops about 2 cm inside the boundary, including any IK detour. Franka Desk's active collision settings are preserved.
 - `gamepad_teleop --check-config` validates text configuration only and cannot connect to hardware.
 - Motion requires a valid configuration, `--enable-motion`, and a held deadman button before the program opens an FCI connection.
-- Releasing the deadman pauses: the arm is brought smoothly to zero velocity and holds while the session stays open; pressing RB again resumes. Ctrl-C, joystick disconnect/read failure, missed input heartbeat, or loss of the gripper connection ends the arm-control loop with a zero Cartesian velocity. A single rejected or unsuccessful gripper command is reported and does not stop the arm. The program never retries after a stop; if the robot is still in reflex mode from a previous stop, it runs libfranka's error recovery once at the next startup. Commands are scaled down as any joint approaches within 0.1 rad of its FR3 limit (estimated from the robot Jacobian), and on a libfranka control error the program prints the joint positions against those limits.
-- Cartesian velocity commands are in Franka's base frame `O`: linear velocities are metres/second and angular velocity is radians/second. The configured workspace is a fixed translation box in that frame.
-- The project explicitly rate-limits Cartesian velocity, acceleration, and jerk, begins each control session with a 0.1 s zero-velocity hold, and does not change impedance gains or attempt to bypass robot collision/reflex behaviour.
+- Releasing the deadman pauses: the arm is brought smoothly to zero velocity and holds while the session stays open; pressing RB again resumes. Ctrl-C, joystick disconnect/read failure, missed input heartbeat, or loss of the gripper connection ends the arm-control loop at zero velocity. A single rejected or unsuccessful gripper command is reported and does not stop the arm. The program never retries after a stop; if the robot is still in reflex mode from a previous stop, it runs libfranka's error recovery once at the next startup. Joint velocities stay inside the robot's own position-dependent limits (evaluated 0.05 rad early), so joints come to rest before their limits; on a libfranka control error the program prints the joint positions against the FR3 limits.
+- Stick commands are Cartesian velocities in Franka's base frame `O` (m/s and rad/s); the workspace is a fixed translation box in that frame.
+- Motion is shaped twice (Cartesian and joint S-curves) and clipped by libfranka's joint rate limiter; each session begins with a 0.1 s zero-velocity hold. The project does not change impedance gains or attempt to bypass robot collision/reflex behaviour.
 
 Do not operate until the workcell is clear, the emergency stop is accessible, FCI is enabled, the operator has approved the configuration, and no other client controls the robot or parallel gripper.
 
@@ -23,7 +45,9 @@ cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 ```
 
-`Franka::Franka` must be discoverable through CMake. This PC exposes it from the ROS 2 Humble installation.
+`Franka::Franka` must be discoverable through CMake. This PC exposes it from the ROS 2 Humble installation (libfranka 0.20.4; the IK uses `Robot::getUpper/LowerJointVelocityLimits`, available in recent libfranka versions).
+
+`ctest` includes `diff_ik_test`, an off-robot simulation of the IK on an FR3 kinematic model (FK checked against a recorded robot pose). An end-to-end simulation that runs the real `gamepad_teleop` against a simulated FR3 with a scripted gamepad lives in `tests/sim/` (see its README).
 
 ## Controller mapping first
 
@@ -105,4 +129,4 @@ build/gamepad_teleop --config config/teleop.conf --enable-motion
 
 The tool waits ten seconds for **RB (the right bumper)**. If RB is not held, it exits without opening an FCI connection. Once enabled, release RB to pause motion and press it again to resume. `Ctrl-C` ends the session; it is not a substitute for the physical emergency stop.
 
-There has been no hardware test of the Frankastein-matched profile yet.
+The joint-velocity IK version has been tested in simulation only; the first run on the robot should use the 25 % speed level (D-pad down twice) in a clear workspace.

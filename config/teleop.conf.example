@@ -36,6 +36,12 @@ z_down_speed_scale = 0.5
 # D-pad vertical axis index (confirm with controller_probe); up = faster
 # (max 100%), down = slower (50%, 25%).
 speed_toggle_axis = 7
+# How the IK handles a pushed direction the arm cannot follow in a straight line
+# (for example straight down close to the base, where the elbow would have to
+# fold past its limit). true: the arm swings off the line (a detour of up to
+# several cm) to keep moving; false: it keeps the exact direction and slows or
+# stops. Either way the gripper never leaves the workspace box.
+allow_detour = true
 
 # This tool deliberately preserves Franka Desk's active collision behavior; it
 # never raises or lowers those thresholds.

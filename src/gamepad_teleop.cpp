@@ -13,6 +13,8 @@
 #include <franka/rate_limiting.h>
 #include <franka/robot.h>
 
+#include "diff_ik.h"
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -126,6 +128,10 @@ struct Config {
   double z_down_speed_scale{};
   // Joystick axis for the D-pad vertical direction; up = faster, down = slower.
   int speed_toggle_axis{};
+  // true: the IK may swing the arm off the pushed line to get around unreachable
+  // straight-line paths (e.g. straight down near the base). false: it keeps the
+  // exact direction and slows or stops instead.
+  bool allow_detour{};
   int input_timeout_ms{};
   bool gripper_enabled{};
   double gripper_open_width_m{};
@@ -142,12 +148,12 @@ struct Config {
   if (!stream) {
     throw std::runtime_error("cannot open config '" + path + "'");
   }
-  const std::array<std::string, 25> allowed_keys{
+  const std::array<std::string, 26> allowed_keys{
       "robot_ip", "joystick_path", "controller_profile", "deadzone", "max_linear_speed_m_s",
       "max_angular_speed_rad_s", "max_linear_acceleration_m_s2", "max_linear_jerk_m_s3",
       "max_angular_acceleration_rad_s2", "max_angular_jerk_rad_s3", "initial_zero_hold_s",
       "workspace_x_m", "workspace_y_m", "workspace_z_m", "z_down_speed_scale",
-      "speed_toggle_axis", "input_timeout_ms", "gripper_enabled", "gripper_open_width_m",
+      "speed_toggle_axis", "allow_detour", "input_timeout_ms", "gripper_enabled", "gripper_open_width_m",
       "gripper_open_speed_m_s", "gripper_grasp_width_m", "gripper_grasp_speed_m_s",
       "gripper_grasp_force_N", "gripper_grasp_epsilon_inner_m", "gripper_grasp_epsilon_outer_m"};
   std::unordered_map<std::string, std::string> values;
@@ -216,6 +222,7 @@ struct Config {
       .workspace_z_m = parse_array<2>("workspace_z_m", required(values, "workspace_z_m")),
       .z_down_speed_scale = parse_double("z_down_speed_scale", required(values, "z_down_speed_scale")),
       .speed_toggle_axis = parse_nonnegative_integer("speed_toggle_axis", required(values, "speed_toggle_axis")),
+      .allow_detour = parse_boolean("allow_detour", required(values, "allow_detour")),
       .input_timeout_ms = parse_nonnegative_integer("input_timeout_ms", required(values, "input_timeout_ms")),
       .gripper_enabled = parse_boolean("gripper_enabled", required(values, "gripper_enabled")),
       .gripper_open_width_m = parse_double("gripper_open_width_m", required(values, "gripper_open_width_m")),
@@ -524,93 +531,30 @@ constexpr double kBrakingAccelerationFraction = 0.5;
   return velocity;
 }
 
-// FR3 joint position limits (same values as Frankastein configs/robots/fr3.yaml).
-constexpr std::array<double, 7> kJointLowerRad{-2.7437, -1.7837, -2.9007, -3.0421,
-                                               -2.8065, 0.5445,  -3.0159};
-constexpr std::array<double, 7> kJointUpperRad{2.7437, 1.7837, 2.9007, -0.1518,
-                                               2.8065, 4.5169, 3.0159};
-// Joints stop this far inside their limits; the robot's own reflex limits sit
-// close to the values above, so this keeps its IK away from them.
-constexpr double kJointLimitMarginRad = 0.10;
-// Joint deceleration planned for braking toward a limit (well under FR3 limits).
-constexpr double kJointBrakingAccelerationRad_s2 = 1.0;
-// Cap on estimated joint speed, which also slows motion near singularities
-// where a small Cartesian velocity needs very fast joint motion.
+// FR3 joint position limits from the robot's URDF (libfranka test/fr3.urdf).
+// The robot enforces position-dependent velocity limits derived from these;
+// the control loop reads those exact limits from libfranka each tick.
+constexpr std::array<double, 7> kJointLowerRad{-2.7501, -1.7918, -2.9065, -3.0481,
+                                               -2.8101, 0.54092, -3.0196};
+constexpr std::array<double, 7> kJointUpperRad{2.7501, 1.7918, 2.9065, -0.1458,
+                                               2.8101, 4.5205, 3.0196};
+// Joints are brought to rest this far before the robot's own limit (the robot's
+// velocity bound is evaluated this much closer to the limit than the joint is).
+constexpr double kJointLimitMarginRad = 0.05;
+// Teleop cap on any joint's speed; well under the FR3's 2.6-5.3 rad/s.
 constexpr double kMaximumJointSpeedRad_s = 1.0;
+// Null-space (elbow) motion fades in between 0 and this fraction of full stick,
+// so the elbow never moves by itself while the sticks are idle.
+constexpr double kNullspaceFullActivity = 0.1;
 
-// Joint velocity the robot needs for Cartesian twist `twist` (base frame O),
-// estimated with damped least squares: dq = J^T (J J^T + lambda^2 I)^-1 v.
-// The robot's internal IK may resolve redundancy differently, so this is an
-// estimate used only to scale commands down, never up.
-[[nodiscard]] std::array<double, 7> estimate_joint_velocity(const std::array<double, 42>& jacobian,
-                                                            const std::array<double, 6>& twist) {
-  constexpr double kDampingSquared = 1e-4;
-  // `jacobian` is 6x7 column-major: element (row, col) = jacobian[col * 6 + row].
-  std::array<std::array<double, 7>, 6> system{};  // [J J^T + lambda^2 I | v]
-  for (size_t row = 0; row < 6; ++row) {
-    for (size_t col = 0; col < 6; ++col) {
-      double sum = row == col ? kDampingSquared : 0.0;
-      for (size_t joint = 0; joint < 7; ++joint) {
-        sum += jacobian[joint * 6 + row] * jacobian[joint * 6 + col];
-      }
-      system[row][col] = sum;
-    }
-    system[row][6] = twist[row];
-  }
-  for (size_t pivot = 0; pivot < 6; ++pivot) {  // Gaussian elimination, partial pivoting.
-    size_t best = pivot;
-    for (size_t row = pivot + 1; row < 6; ++row) {
-      if (std::abs(system[row][pivot]) > std::abs(system[best][pivot])) {
-        best = row;
-      }
-    }
-    std::swap(system[pivot], system[best]);
-    for (size_t row = pivot + 1; row < 6; ++row) {
-      const double factor = system[row][pivot] / system[pivot][pivot];
-      for (size_t col = pivot; col < 7; ++col) {
-        system[row][col] -= factor * system[pivot][col];
-      }
-    }
-  }
-  std::array<double, 6> solution{};
-  for (size_t row = 6; row-- > 0;) {
-    double sum = system[row][6];
-    for (size_t col = row + 1; col < 6; ++col) {
-      sum -= system[row][col] * solution[col];
-    }
-    solution[row] = sum / system[row][row];
-  }
-  std::array<double, 7> joint_velocity{};
-  for (size_t joint = 0; joint < 7; ++joint) {
-    for (size_t row = 0; row < 6; ++row) {
-      joint_velocity[joint] += jacobian[joint * 6 + row] * solution[row];
-    }
-  }
-  return joint_velocity;
-}
-
-// Factor in [0, 1] that keeps every joint below kMaximumJointSpeedRad_s and
-// able to stop kJointLimitMarginRad before its limit. Motion that takes a
-// joint away from its limit is never restricted by that limit.
-[[nodiscard]] double joint_limit_scale(const franka::RobotState& state,
-                                       const std::array<double, 42>& jacobian,
-                                       const std::array<double, 6>& twist) {
-  const std::array<double, 7> joint_velocity = estimate_joint_velocity(jacobian, twist);
-  double scale = 1.0;
-  for (size_t joint = 0; joint < 7; ++joint) {
-    const double speed = std::abs(joint_velocity[joint]);
-    if (speed < 1e-9) {
-      continue;
-    }
-    const double distance = joint_velocity[joint] > 0.0
-                                ? kJointUpperRad[joint] - state.q[joint]
-                                : state.q[joint] - kJointLowerRad[joint];
-    const double usable = std::max(0.0, distance - kJointLimitMarginRad);
-    const double allowed = std::min(kMaximumJointSpeedRad_s,
-                                    std::sqrt(2.0 * kJointBrakingAccelerationRad_s2 * usable));
-    scale = std::min(scale, allowed / speed);
-  }
-  return scale;
+[[nodiscard]] diff_ik::Params ik_params(const Config& config) {
+  diff_ik::Params params;  // Posture: Franka ready pose; see diff_ik.h for gains.
+  params.q_lower = kJointLowerRad;
+  params.q_upper = kJointUpperRad;
+  // Strict mode: fall back to the exact direction (slower) if the per-joint
+  // saturation step would stray more than 5 % from the pushed direction.
+  params.max_task_error = config.allow_detour ? 1e9 : 0.05;
+  return params;
 }
 
 void print_joint_positions(const std::array<double, 7>& q) {
@@ -623,19 +567,20 @@ void print_joint_positions(const std::array<double, 7>& q) {
   }
 }
 
-// Turns the raw stick target into a smooth jerk-limited (S-curve) velocity
-// before franka::limitRate. limitRate only clips: fed a stepping stick value it
-// chases it at full jerk, overshoots, and rings (simulated: about +/-5 cm/s
-// back-and-forth after releasing the stick at 1 m/s^2 and 10 m/s^3, which is
-// felt as vibration). Here the acceleration toward the target is capped at
-// sqrt(2 * jerk * error), so it reaches zero exactly as the velocity arrives
-// and nothing overshoots. Linear and angular parts are shaped separately, as
-// vectors, starting from the robot's last commanded velocity and acceleration.
+// Turns the raw stick target into a smooth jerk-limited (S-curve) twist before
+// the IK. Feeding raw stick steps to a jerk-limited rate limiter makes it chase
+// at full jerk, overshoot and ring (simulated: about +/-5 cm/s back-and-forth
+// after releasing the stick at 1 m/s^2 and 10 m/s^3, felt as vibration). Here
+// the acceleration toward the target is capped at sqrt(2 * jerk * error), so it
+// reaches zero exactly as the velocity arrives and nothing overshoots. Linear
+// and angular parts are shaped separately, as vectors, starting from the last
+// shaped velocity and acceleration.
 constexpr double kShaperJerkMargin = 0.8;  // Plan with 80 % of the jerk limit.
 
 void shape_group(const std::array<double, 6>& target, const std::array<double, 6>& last_velocity,
                  const std::array<double, 6>& last_acceleration, size_t first, double max_acceleration,
-                 double max_jerk, std::array<double, 6>& shaped) {
+                 double max_jerk, std::array<double, 6>& shaped,
+                 std::array<double, 6>& shaped_acceleration) {
   constexpr double kDeltaT = 1e-3;
   std::array<double, 3> error{};
   std::array<double, 3> acceleration{};
@@ -649,9 +594,15 @@ void shape_group(const std::array<double, 6>& target, const std::array<double, 6
   }
   error_norm = std::sqrt(error_norm);
   acceleration_norm = std::sqrt(acceleration_norm);
-  if (error_norm < 1e-7 && acceleration_norm < max_jerk * kDeltaT) {
+  // Snap window: a few ticks' worth of jerk-limited change (5e-5 m/s linear,
+  // 1.25e-4 rad/s angular at the configured limits). Closer than that, the
+  // discrete S-curve would hop back and forth around the target instead.
+  if (error_norm < 5.0 * max_jerk * kDeltaT * kDeltaT && acceleration_norm < max_jerk * kDeltaT) {
+    // Arrived: hold the target exactly with zero acceleration (otherwise the
+    // leftover acceleration of the snap step starts a tiny limit cycle).
     for (size_t axis = 0; axis < 3; ++axis) {
       shaped[first + axis] = target[first + axis];
+      shaped_acceleration[first + axis] = 0.0;
     }
     return;
   }
@@ -677,25 +628,95 @@ void shape_group(const std::array<double, 6>& target, const std::array<double, 6
   const double acceleration_scale =
       new_acceleration_norm > max_acceleration ? max_acceleration / new_acceleration_norm : 1.0;
   for (size_t axis = 0; axis < 3; ++axis) {
-    shaped[first + axis] =
-        last_velocity[first + axis] + acceleration[axis] * acceleration_scale * kDeltaT;
+    shaped_acceleration[first + axis] = acceleration[axis] * acceleration_scale;
+    shaped[first + axis] = last_velocity[first + axis] + shaped_acceleration[first + axis] * kDeltaT;
   }
 }
 
-[[nodiscard]] std::array<double, 6> shape_velocity(const std::array<double, 6>& target,
-                                                   const franka::RobotState& state,
-                                                   const Config& config) {
-  std::array<double, 6> shaped{};
-  shape_group(target, state.O_dP_EE_c, state.O_ddP_EE_c, 0, config.max_linear_acceleration_m_s2,
-              config.max_linear_jerk_m_s3, shaped);
-  shape_group(target, state.O_dP_EE_c, state.O_ddP_EE_c, 3,
-              config.max_angular_acceleration_rad_s2, config.max_angular_jerk_rad_s3, shaped);
+// Keeps the shaped twist and its acceleration between control ticks. (In joint
+// velocity mode the robot does not report a commanded Cartesian velocity.)
+class TwistShaper {
+ public:
+  [[nodiscard]] std::array<double, 6> step(const std::array<double, 6>& target, const Config& config) {
+    std::array<double, 6> shaped{};
+    std::array<double, 6> shaped_acceleration{};
+    shape_group(target, velocity_, acceleration_, 0, config.max_linear_acceleration_m_s2,
+                config.max_linear_jerk_m_s3, shaped, shaped_acceleration);
+    shape_group(target, velocity_, acceleration_, 3, config.max_angular_acceleration_rad_s2,
+                config.max_angular_jerk_rad_s3, shaped, shaped_acceleration);
+    acceleration_ = shaped_acceleration;
+    velocity_ = shaped;
+    return shaped;
+  }
+
+ private:
+  std::array<double, 6> velocity_{};
+  std::array<double, 6> acceleration_{};
+};
+
+// Joint-space S-curve between the IK and libfranka's limiter. The IK output can
+// step when a joint freezes at or leaves its bound; shaped here at half the
+// FR3's acceleration and a tenth of its jerk limit, those steps become smooth
+// ramps, so the robot-limit clip afterwards never has to act.
+constexpr double kJointShaperAccelerationRad_s2 = 5.0;
+constexpr double kJointShaperJerkRad_s3 = 500.0;
+
+[[nodiscard]] std::array<double, 7> shape_joint_velocity(const std::array<double, 7>& target,
+                                                         const franka::RobotState& state) {
+  constexpr double kDeltaT = 1e-3;
+  constexpr double a_max = kJointShaperAccelerationRad_s2;
+  constexpr double j_max = kJointShaperJerkRad_s3;
+  std::array<double, 7> shaped{};
+  for (size_t joint = 0; joint < 7; ++joint) {
+    const double velocity = state.dq_d[joint];
+    const double acceleration = state.ddq_d[joint];
+    const double error = target[joint] - velocity;
+    // Snap window of two ticks' jerk-limited change keeps the arrival step (and
+    // its jerk spike, <= ~1500 rad/s^3) well under the FR3's 5000 rad/s^3.
+    if (std::abs(error) < 2.0 * j_max * kDeltaT * kDeltaT && std::abs(acceleration) < j_max * kDeltaT) {
+      shaped[joint] = target[joint];
+      continue;
+    }
+    const double desired =
+        std::copysign(std::min(a_max, std::sqrt(2.0 * kShaperJerkMargin * j_max * std::abs(error))), error);
+    const double jerk = std::clamp((desired - acceleration) / kDeltaT, -j_max, j_max);
+    const double new_acceleration = std::clamp(acceleration + jerk * kDeltaT, -a_max, a_max);
+    shaped[joint] = velocity + new_acceleration * kDeltaT;
+  }
   return shaped;
 }
 
-[[nodiscard]] bool near_zero(const std::array<double, 6>& velocity) {
-  return std::all_of(velocity.begin(), velocity.end(), [](const double value) {
-    return std::abs(value) < 1e-6;
+// Fence check on the arm's actual motion (J * dq), not just the commanded twist:
+// a detour or IK approximation can move the gripper sideways, and that must not
+// carry it through the workspace box either. Returns the factor (0..1) to scale
+// the joint velocities by so that every axis can still stop before its wall.
+[[nodiscard]] double fence_scale(const franka::RobotState& state, const Config& config,
+                                 const Workspace& workspace, const std::array<double, 42>& jacobian,
+                                 const std::array<double, 7>& joint_velocity) {
+  double scale = 1.0;
+  for (size_t axis = 0; axis < 3; ++axis) {
+    double velocity = 0.0;
+    for (size_t joint = 0; joint < 7; ++joint) {
+      velocity += jacobian[joint * 6 + axis] * joint_velocity[joint];
+    }
+    const double position = state.O_T_EE[12 + axis];
+    const double allowed =
+        velocity > 0.0
+            ? stoppable_speed(workspace.maximum_m[axis] - position, config.max_linear_acceleration_m_s2,
+                              config.max_linear_jerk_m_s3)
+            : stoppable_speed(position - workspace.minimum_m[axis], config.max_linear_acceleration_m_s2,
+                              config.max_linear_jerk_m_s3);
+    if (std::abs(velocity) > allowed) {
+      scale = std::min(scale, allowed / std::abs(velocity));
+    }
+  }
+  return scale;
+}
+
+template <size_t N>
+[[nodiscard]] bool near_zero(const std::array<double, N>& velocity, double tolerance = 1e-6) {
+  return std::all_of(velocity.begin(), velocity.end(), [tolerance](const double value) {
+    return std::abs(value) < tolerance;
   });
 }
 
@@ -821,9 +842,14 @@ int main(int argc, char** argv) {
     }
     std::atomic<int> stop_reason{0};
     double control_elapsed_s = 0.0;
-    std::cout << "Motion enabled. Cartesian velocities use robot base frame O; Desk collision behavior is preserved.\n";
+    const diff_ik::Params ik = ik_params(config);
+    diff_ik::Params ik_strict = ik;
+    ik_strict.max_task_error = 0.05;
+    TwistShaper shaper;
+    std::cout << "Motion enabled. Sticks command base-frame Cartesian velocity; joint velocities come from\n"
+                 "the onboard IK solver. Desk collision behavior is preserved.\n";
     robot.control(
-        [&](const franka::RobotState& state, franka::Duration period) -> franka::CartesianVelocities {
+        [&](const franka::RobotState& state, franka::Duration period) -> franka::JointVelocities {
           control_elapsed_s += period.toSec();
           bool stopping = false;
           if (g_stop_requested != 0) {
@@ -838,32 +864,90 @@ int main(int argc, char** argv) {
             stop_reason.store(4);
             stopping = true;
           }
-          // RB released = pause: command zero velocity (the rate limiter brings the
-          // arm smoothly to rest) but keep the session open so RB resumes instantly.
+          // RB released = pause: command zero velocity (the S-curve brings the arm
+          // smoothly to rest) but keep the session open so RB resumes instantly.
           const bool paused = !input.deadman_pressed();
-          std::array<double, 6> target_velocity{};
+          std::array<double, 6> target_twist{};
           if (!stopping && !paused && control_elapsed_s >= config.initial_zero_hold_s) {
-            target_velocity = bounded_velocity(state, config, workspace, input);
-            if (!near_zero(target_velocity)) {
-              const double scale = joint_limit_scale(
-                  state, model.zeroJacobian(franka::Frame::kEndEffector, state), target_velocity);
-              for (double& component : target_velocity) {
-                component *= scale;
+            target_twist = bounded_velocity(state, config, workspace, input);
+          }
+          // 1. Smooth S-curve in Cartesian space.
+          const std::array<double, 6> twist = shaper.step(target_twist, config);
+
+          // 2. Per-joint velocity bounds: the robot's own position-dependent limits,
+          //    evaluated kJointLimitMarginRad closer to each limit, capped for teleop.
+          std::array<double, 7> q_toward_upper{};
+          std::array<double, 7> q_toward_lower{};
+          for (size_t joint = 0; joint < 7; ++joint) {
+            q_toward_upper[joint] = state.q_d[joint] + kJointLimitMarginRad;
+            q_toward_lower[joint] = state.q_d[joint] - kJointLimitMarginRad;
+          }
+          std::array<double, 7> upper = robot.getUpperJointVelocityLimits(q_toward_upper);
+          std::array<double, 7> lower = robot.getLowerJointVelocityLimits(q_toward_lower);
+          for (size_t joint = 0; joint < 7; ++joint) {
+            upper[joint] = std::min(upper[joint], kMaximumJointSpeedRad_s);
+            lower[joint] = std::max(lower[joint], -kMaximumJointSpeedRad_s);
+          }
+
+          // 3. IK: twist -> joint velocities, with posture pull while the sticks move.
+          const double activity =
+              std::max(std::hypot(twist[0], twist[1], twist[2]) / config.max_linear_speed_m_s,
+                       std::hypot(twist[3], twist[4], twist[5]) / config.max_angular_speed_rad_s);
+          const double nullspace_weight = std::clamp(activity / kNullspaceFullActivity, 0.0, 1.0);
+          std::array<double, 7> joint_velocity{};
+          if (!near_zero(twist)) {
+            const std::array<double, 42> jacobian = model.zeroJacobian(franka::Frame::kEndEffector, state);
+            // 3b. Keep the resulting gripper motion (including any detour) inside the box.
+            auto solve_fenced = [&](const diff_ik::Params& params) {
+              std::array<double, 7> dq =
+                  diff_ik::solve(jacobian, twist, state.q, lower, upper, nullspace_weight, params).dq;
+              const double scale = fence_scale(state, config, workspace, jacobian, dq);
+              for (double& value : dq) {
+                value *= scale;
+              }
+              return std::pair{dq, scale};
+            };
+            // Progress along the pushed twist (dot product of achieved and requested).
+            auto progress = [&](const std::array<double, 7>& dq) {
+              double sum = 0.0;
+              for (size_t joint = 0; joint < 7; ++joint) {
+                for (size_t row = 0; row < 6; ++row) {
+                  sum += jacobian[joint * 6 + row] * dq[joint] * twist[row];
+                }
+              }
+              return sum;
+            };
+            auto [dq, scale] = solve_fenced(ik);
+            if (config.allow_detour && scale < 0.999) {
+              // The detour runs into a wall (e.g. in a corner): the exact-direction
+              // solution may still make progress where the detour cannot.
+              auto [strict_dq, strict_scale] = solve_fenced(ik_strict);
+              (void)strict_scale;
+              if (progress(strict_dq) > progress(dq)) {
+                dq = strict_dq;
               }
             }
+            // Never move against the push: when the push is impossible from this pose,
+            // the best-effort solution can come out partly backwards. Hold instead.
+            if (progress(dq) <= 0.0) {
+              dq = {};
+            }
+            joint_velocity = dq;
           }
-          // Smooth S-curve first; limitRate stays as the hard safety clip.
-          const std::array<double, 6> limited_velocity = franka::limitRate(
-              config.max_linear_speed_m_s, config.max_linear_acceleration_m_s2,
-              config.max_linear_jerk_m_s3, config.max_angular_speed_rad_s,
-              config.max_angular_acceleration_rad_s2, config.max_angular_jerk_rad_s3,
-              shape_velocity(target_velocity, state, config), state.O_dP_EE_c, state.O_ddP_EE_c);
-          if (stopping && near_zero(limited_velocity)) {
-            return franka::MotionFinished(franka::CartesianVelocities(limited_velocity));
+
+          // 4. Joint-space S-curve, then the hard safety clip with the robot's
+          //    exact velocity limits and max acceleration/jerk.
+          const std::array<double, 7> limited = franka::limitRate(
+              robot.getUpperJointVelocityLimits(state.q_d), robot.getLowerJointVelocityLimits(state.q_d),
+              franka::kMaxJointAcceleration, franka::kMaxJointJerk, shape_joint_velocity(joint_velocity, state),
+              state.dq_d, state.ddq_d);
+          // libfranka's joint limiter settles into a +/-1e-5 rad/s dither around zero.
+          if (stopping && near_zero(twist) && near_zero(limited, 1e-4)) {
+            return franka::MotionFinished(franka::JointVelocities(limited));
           }
-          return franka::CartesianVelocities(limited_velocity);
+          return franka::JointVelocities(limited);
         },
-        franka::ControllerMode::kCartesianImpedance, false, franka::kMaxCutoffFrequency);
+        franka::ControllerMode::kJointImpedance, false, franka::kMaxCutoffFrequency);
     stop_requested.store(true);
     if (gripper_worker.has_value()) {
       gripper_worker->request_stop();
