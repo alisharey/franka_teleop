@@ -1,6 +1,6 @@
 # Franka gamepad teleoperation
 
-Standalone gamepad teleoperation for a Franka FR3 with the parallel gripper. The sticks command a Cartesian velocity of the gripper; an onboard differential-IK solver turns that into joint velocities at 1 kHz. It does not modify or depend on `Franka-SM` at runtime.
+Standalone gamepad teleoperation for a Franka FR3 with the parallel gripper. The sticks command a Cartesian velocity of the gripper; an onboard differential-IK solver turns that into joint velocities at 1 kHz.
 
 ## How motion is computed
 
@@ -65,7 +65,7 @@ build/controller_probe --device /dev/input/by-id/usb-Microsoft_Android-joystick 
 
 It prints normalized Cartesian translation or rotation commands but contains no libfranka code and cannot reach the robot. This is an input preview, not a 3D physics simulator.
 
-This is only needed to diagnose a controller problem. The `xbox_android_standard` profile is fixed to the currently detected controller: hold physical **RB** (reported as Linux button 7) to enable motion, right-stick vertical for base-frame X (push down = +X, away from the base), left-stick horizontal for base-frame Y (push right = +Y), left-stick vertical for base-frame Z (push up = +Z), and hold **L1** (Linux button 6) or **L2** to change the sticks into rotation mode (left stick roll/pitch, right-stick horizontal yaw). **A** opens and **B** closes the parallel gripper while RB is held. **D-pad up/down** switches speed between 100 %, 50 % and 25 % (the D-pad axis is `speed_toggle_axis`, 7 by default; confirm it with `controller_probe`). Downward Z moves at half speed, like Frankastein. The detected controller provides eight axes and fifteen buttons; use the stable `/dev/input/by-id` path, not `/dev/input/js0`, because `js0` can change after reconnecting devices.
+This is only needed to diagnose a controller problem. The `xbox_android_standard` profile is fixed to the currently detected controller: hold physical **RB** (reported as Linux button 7) to enable motion, right-stick vertical for base-frame X (push up = +X, away from the base), left-stick horizontal for base-frame Y (push right = +Y), left-stick vertical for base-frame Z (push up = +Z), and hold **L1** (Linux button 6) or **L2** to change the sticks into rotation mode (left stick roll/pitch, right-stick horizontal yaw). **A** opens and **B** closes the parallel gripper while RB is held. **D-pad up/down** switches speed between 100 %, 50 % and 25 % (the D-pad axis is `speed_toggle_axis`, 7 by default; confirm it with `controller_probe`). Downward Z moves at half speed, like Frankastein. The detected controller provides eight axes and fifteen buttons; use the stable `/dev/input/by-id` path, not `/dev/input/js0`, because `js0` can change after reconnecting devices.
 
 ## Choosing your own workspace limits
 
@@ -90,9 +90,9 @@ cp config/teleop.conf.example config/teleop.conf
 build/gamepad_teleop --config config/teleop.conf --check-config
 ```
 
-The supplied `config/teleop.conf` matches Frankastein's keyboard teleop: `0.15 m/s`, `0.40 rad/s`, `1.0 m/s²` / `10 m/s³` linear and `2.5 rad/s²` / `25 rad/s³` angular rate limits, a `0.1 s` zero-velocity startup hold, Frankastein's fixed workspace, and its gripper settings (open `0.08 m/s`, grasp `0.03 m/s` at `50 N`). It preserves the currently configured Franka Desk collision behavior.
+The supplied `config/teleop.conf` uses `0.15 m/s` and `0.40 rad/s` top speeds, `1.0 m/s²` / `10 m/s³` linear and `2.5 rad/s²` / `25 rad/s³` angular S-curve limits, a `0.1 s` zero-velocity startup hold, the lab's fixed workspace box, and the parallel-gripper settings (open `0.08 m/s`, grasp `0.03 m/s` at `50 N`). Speeds and gripper settings were originally taken from Frankastein's keyboard teleop. It preserves the currently configured Franka Desk collision behavior.
 
-The tool commands Cartesian velocity in the base frame `O`; a controlled, clear-workspace verification is still required before physical use because the operator's view may not be aligned with that frame.
+Stick directions are in the robot base frame `O`; a controlled, clear-workspace check is still required before physical use because the operator's view may not be aligned with that frame.
 
 ## Kernel: PREEMPT_RT or lowlatency
 

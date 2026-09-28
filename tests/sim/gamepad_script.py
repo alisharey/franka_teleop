@@ -50,8 +50,8 @@ at(14.0, "up_start")           # left stick up -> base +Z: climb back out of the
 axis(1, -FULL)
 at(17.0, "up_end")
 axis(1, 0)
-at(17.5, "toward_base_start")  # right stick up -> base -X (push down = +X)
-axis(3, -FULL)
+at(17.5, "toward_base_start")  # right stick down -> base -X, toward the base (push up = +X)
+axis(3, FULL)
 at(21.0, "toward_base_end")
 axis(3, 0)
 at(21.5, "pause_start")        # RB released; stick pushed: arm must not move

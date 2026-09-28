@@ -14,10 +14,10 @@ joystick_path = /dev/input/by-id/usb-Microsoft_Android-joystick
 controller_profile = xbox_android_standard
 deadzone = REQUIRED
 
-# Base-frame Cartesian velocity limits. No values are supplied by this project.
+# Top speeds of the gripper (base frame). No values are supplied by this project.
 max_linear_speed_m_s = REQUIRED
 max_angular_speed_rad_s = REQUIRED
-# Every velocity change is explicitly rate-limited before it is sent to FCI.
+# S-curve limits for the commanded gripper motion (before the IK).
 max_linear_acceleration_m_s2 = 1.0
 max_linear_jerk_m_s3 = 10.0
 max_angular_acceleration_rad_s2 = 2.5

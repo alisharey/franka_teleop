@@ -505,10 +505,10 @@ constexpr double kBrakingAccelerationFraction = 0.5;
                 -input.axis(kLeftStickY) * angular,
                 input.axis(kRightStickX) * angular};
   } else {
-    // Right stick up/down -> base X (push down = +X, away from the base);
+    // Right stick up/down -> base X (push up = +X, away from the base);
     // left stick left/right -> base Y (push right = +Y);
     // left stick up/down -> base Z (push up = +Z).
-    velocity = {input.axis(kRightStickY) * linear,
+    velocity = {-input.axis(kRightStickY) * linear,
                 input.axis(kLeftStickX) * linear,
                 -input.axis(kLeftStickY) * linear,
                 0.0,

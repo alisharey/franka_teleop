@@ -55,7 +55,7 @@ void print_xbox_preview(const std::array<int16_t, 8>& axes, const std::array<boo
               << " pitch=" << -deadzoned_axis(axes[1])
               << " yaw=" << deadzoned_axis(axes[2]) << " [normalized]\n";
   } else {
-    std::cout << "  translation mode: base_x=" << deadzoned_axis(axes[3])
+    std::cout << "  translation mode: base_x=" << -deadzoned_axis(axes[3])
               << " base_y=" << deadzoned_axis(axes[0])
               << " base_z=" << -deadzoned_axis(axes[1]) << " [normalized]\n";
   }
