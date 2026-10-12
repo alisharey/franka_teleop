@@ -153,6 +153,7 @@ Gripper::Gripper(const std::string&) { throw std::runtime_error("no gripper in s
 Gripper::~Gripper() noexcept = default;
 bool Gripper::grasp(double, double, double, double, double) const { return false; }
 bool Gripper::move(double, double) const { return false; }
+GripperState Gripper::readOnce() const { return {}; }
 
 }  // namespace franka
 

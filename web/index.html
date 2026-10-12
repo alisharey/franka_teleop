@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Franka Recorder</title>
+<style>
+  :root {
+    --bg: #f6f6f4; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #e2e1dc;
+    --accent: #2f6fdb; --ok: #1f8a4c; --warn: #b7791f; --rec: #d63a2f; --chip: #efeeea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151514; --panel: #1e1e1c; --text: #ecebe6; --muted: #9a9993; --line: #2e2e2b;
+      --accent: #6c9cf0; --ok: #4cc27f; --warn: #e0a84a; --rec: #f0584c; --chip: #2a2a27;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+           padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  h1 { font-size: 17px; margin: 0 12px 0 0; font-weight: 650; }
+  h2 { font-size: 14px; margin: 0 0 10px; font-weight: 650; }
+  main { padding: 18px 20px 40px; display: grid; gap: 18px; max-width: 1400px; margin: 0 auto; }
+  .chip { background: var(--chip); border-radius: 999px; padding: 3px 10px; font-size: 12.5px; color: var(--muted); }
+  .chip b { color: var(--text); font-weight: 600; }
+  .chip.good b { color: var(--ok); } .chip.bad b { color: var(--rec); } .chip.warn b { color: var(--warn); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .recbar { display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: center; }
+  .recbtn { width: 150px; height: 56px; border-radius: 10px; border: 0; font-size: 16px; font-weight: 650;
+            cursor: pointer; color: #fff; background: var(--rec); display: flex; align-items: center;
+            justify-content: center; gap: 10px; }
+  .recbtn.recording { background: var(--text); color: var(--panel); }
+  .recbtn:disabled { opacity: .5; cursor: default; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; background: currentColor; }
+  .recording .dot { border-radius: 2px; }
+  .recinfo { display: grid; gap: 8px; }
+  .timer { font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 650; }
+  .timer.live { color: var(--rec); }
+  .fields { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; }
+  label { font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
+  input[type=text] { width: 100%; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--line);
+                     background: var(--bg); color: var(--text); font: inherit; }
+  .cams { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+  .cam .head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; gap: 8px; }
+  .cam .meta { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .view { position: relative; aspect-ratio: 4 / 3; background: #000; border-radius: 7px; overflow: hidden; }
+  .view img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .view .stale { position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
+                 color: #fff; background: rgba(0,0,0,.6); font-weight: 600; }
+  .view.isstale .stale { display: flex; }
+  .robot { display: flex; gap: 8px; flex-wrap: wrap; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .name { font-weight: 600; cursor: text; }
+  .name:hover { text-decoration: underline dotted; }
+  .task { color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .btn { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 5px 10px;
+         border-radius: 7px; cursor: pointer; font: inherit; font-size: 13px; }
+  .btn:hover { border-color: var(--muted); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.danger:hover { border-color: var(--rec); color: var(--rec); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .seg button { border: 0; background: transparent; color: var(--muted); padding: 4px 9px; cursor: pointer; font: inherit; }
+  .seg button.on.s { background: var(--ok); color: #fff; }
+  .seg button.on.f { background: var(--rec); color: #fff; }
+  .actions { display: flex; gap: 6px; justify-content: flex-end; }
+  .status { font-size: 12px; color: var(--muted); }
+  .status.warn { color: var(--warn); }
+  .empty { color: var(--muted); padding: 18px 8px; }
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--text);
+           color: var(--panel); padding: 9px 14px; border-radius: 8px; display: none; max-width: 90vw; }
+  dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--text);
+           padding: 16px; width: min(1100px, 95vw); }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  dialog video { width: 100%; background: #000; border-radius: 7px; max-height: 70vh; }
+  dialog .dhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 10px; }
+  .files { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; font-size: 12.5px; }
+  .files a { color: var(--accent); }
+  @media (max-width: 720px) {
+    .recbar { grid-template-columns: 1fr; }
+    .fields { grid-template-columns: 1fr; }
+    .hide-sm { display: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Franka episode recorder</h1>
+  <span class="chip" id="chip-teleop">Teleop <b>–</b></span>
+  <span class="chip" id="chip-deadman">Deadman <b>–</b></span>
+  <span class="chip" id="chip-disk">Disk <b>–</b></span>
+  <span class="chip hide-sm" id="chip-dir">–</span>
+</header>
+<main>
+  <section class="panel recbar">
+    <button class="recbtn" id="recbtn"><span class="dot"></span><span id="reclabel">Record</span></button>
+    <div class="recinfo">
+      <div><span class="timer" id="timer">00:00.0</span>
+        <span class="status" id="rechint"></span></div>
+      <div class="fields">
+        <label>Task instruction (saved with each new episode)
+          <input type="text" id="task" placeholder="e.g. pick up the red cube and put it in the bowl"></label>
+        <label>Next episode name (optional)
+          <input type="text" id="nextname" placeholder="auto: episode_0001"></label>
+      </div>
+    </div>
+  </section>
+
+  <section class="cams" id="cams"></section>
+
+  <section class="panel">
+    <h2>Robot</h2>
+    <div class="robot" id="robot"><span class="chip">Waiting for gamepad_teleop…</span></div>
+  </section>
+
+  <section class="panel">
+    <h2>Episodes</h2>
+    <table>
+      <thead><tr>
+        <th>Name</th><th class="hide-sm">Task</th><th>Length</th><th class="hide-sm">Size</th>
+        <th>Outcome</th><th></th>
+      </tr></thead>
+      <tbody id="episodes"></tbody>
+    </table>
+  </section>
+</main>
+
+<dialog id="player">
+  <div class="dhead"><h2 id="player-title" style="margin:0"></h2>
+    <button class="btn" onclick="closePlayer()">Close</button></div>
+  <video id="player-video" controls playsinline></video>
+  <div class="status" id="player-task"></div>
+  <div class="files" id="player-files"></div>
+</dialog>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let status = null, episodesVersion = -1, camsBuilt = false, episodes = [];
+
+function toast(message) {
+  const t = $('toast'); t.textContent = message; t.style.display = 'block';
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.style.display = 'none', 4000);
+}
+async function api(path, body) {
+  const options = body === undefined ? {} :
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  const response = await fetch(path, options);
+  const data = await response.json();
+  if (!response.ok || data.ok === false) throw new Error(data.error || response.statusText);
+  return data;
+}
+function fmtTime(s) {
+  const m = Math.floor(s / 60), r = s - m * 60;
+  return String(m).padStart(2, '0') + ':' + r.toFixed(1).padStart(4, '0');
+}
+function esc(text) {
+  return String(text ?? '').replace(/[&<>"']/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function chip(id, text, cls) { const c = $(id); c.className = 'chip ' + (cls || ''); c.innerHTML = text; }
+
+function buildCams(cameras) {
+  const root = $('cams');
+  root.innerHTML = '';
+  for (const name of Object.keys(cameras)) {
+    const card = document.createElement('div');
+    card.className = 'panel cam';
+    card.innerHTML = `<div class="head"><h2 style="margin:0">${esc(name)}</h2>
+      <span class="meta" id="cam-meta-${name}"></span></div>
+      <div class="view" id="cam-view-${name}"><img alt="${esc(name)} live view" src="/stream/${encodeURIComponent(name)}">
+      <div class="stale">No frames: is the camera launch running?</div></div>`;
+    root.appendChild(card);
+  }
+  camsBuilt = true;
+}
+
+function renderStatus(s) {
+  status = s;
+  if (!camsBuilt) buildCams(s.cameras);
+  const t = s.teleop || {};
+  chip('chip-teleop', t.connected ? `Teleop <b>${t.state_hz} Hz</b>` : 'Teleop <b>not running</b>', t.connected ? 'good' : 'warn');
+  chip("chip-deadman", t.connected ? `Deadman <b>${t.deadman ? "held" : "released"}</b>` : "Deadman <b>–</b>", t.deadman ? "good" : "");
+  chip('chip-disk', `Disk <b>${s.disk_free_gb} GB free</b>`, s.disk_free_gb < 10 ? 'bad' : '');
+  $('chip-dir').textContent = s.data_dir;
+
+  const btn = $('recbtn');
+  btn.classList.toggle('recording', s.recording);
+  btn.disabled = s.busy;
+  $('reclabel').textContent = s.busy ? 'Saving…' : (s.recording ? 'Stop' : 'Record');
+  $('timer').textContent = fmtTime(s.recording ? s.episode.elapsed_s : 0);
+  $('timer').classList.toggle('live', s.recording);
+  const button = 'Y (gamepad) or A (Quest)';
+  $('rechint').className = 'status' + (s.last_error ? ' warn' : '');
+  $('rechint').textContent = s.last_error ? s.last_error :
+    s.recording ? `Recording “${s.episode.name}” · press ${button} or Stop to save` +
+                  (s.episode.bag_backlog > 2000 ? ` · bag backlog ${s.episode.bag_backlog}` : '')
+                : `Press ${button} on the gamepad or Record` +
+                  (t.connected ? '' : ' · gamepad Y works once gamepad_teleop is running');
+
+  for (const [name, c] of Object.entries(s.cameras)) {
+    const meta = $('cam-meta-' + name);
+    if (!meta) continue;
+    const parts = [`${c.color_fps} fps`];
+    if (c.depth_fps) parts.push(`depth ${c.depth_fps} fps`);
+    if (c.width) parts.push(`${c.width}×${c.height}`);
+    if (c.recorded_frames !== null) parts.push(`${c.recorded_frames} frames recorded`);
+    meta.textContent = parts.join(' · ');
+    $('cam-view-' + name).classList.toggle('isstale', c.age_s === null || c.age_s > 1.5);
+  }
+
+  const robot = $('robot');
+  if (t.connected) {
+    const xyz = (t.ee_xyz || []).map((v) => v.toFixed(3)).join(', ');
+    robot.innerHTML = [
+      `EE xyz <b>${xyz}</b> m`, `Gripper <b>${(t.gripper_width * 1000).toFixed(1)} mm</b> (${esc(t.gripper_command)})`,
+      `Mode <b>${esc(t.robot_mode)}</b>`, `Speed <b>${Math.round(t.speed_scale * 100)}%</b>`,
+      t.dropped ? `Dropped ticks <b>${t.dropped}</b>` : '',
+      t.errors && t.errors !== '[]' ? `Errors <b>${esc(t.errors)}</b>` : '',
+    ].filter(Boolean).map((x) => `<span class="chip">${x}</span>`).join('');
+  } else {
+    robot.innerHTML = '<span class="chip">Waiting for gamepad_teleop… (cameras still record without it)</span>';
+  }
+
+  if (s.episodes_version !== episodesVersion) { episodesVersion = s.episodes_version; loadEpisodes(); }
+}
+
+async function loadEpisodes() {
+  try { episodes = (await api('/api/episodes')).episodes; } catch (e) { return; }
+  const body = $('episodes');
+  if (!episodes.length) { body.innerHTML = '<tr><td colspan="6" class="empty">No episodes yet.</td></tr>'; return; }
+  body.innerHTML = episodes.map((e) => {
+    const busy = e.status === 'recording' || e.status === 'processing';
+    const warn = (e.warnings || []).length ? ` · <span class="status warn" title="${esc(e.warnings.join('\n'))}">⚠ ${e.warnings.length}</span>` : '';
+    const state = busy ? `<div class="status">${e.status}…</div>` : '';
+    return `<tr data-id="${esc(e.id)}">
+      <td><div class="name" title="Click to rename" onclick="renameEpisode('${esc(e.id)}')">${esc(e.name)}</div>
+          <div class="status">${esc((e.created || '').replace('T', ' '))}${warn}</div>${state}</td>
+      <td class="task hide-sm" title="${esc(e.task)}">${esc(e.task) || '<span class="status">–</span>'}</td>
+      <td class="num">${e.duration_s != null ? fmtTime(e.duration_s) : '–'}</td>
+      <td class="num hide-sm">${e.size_mb} MB</td>
+      <td><span class="seg">
+        <button class="s ${e.success === true ? 'on' : ''}" ${busy ? 'disabled' : ''} onclick="setOutcome('${esc(e.id)}', ${e.success === true ? 'null' : 'true'})">Success</button>
+        <button class="f ${e.success === false ? 'on' : ''}" ${busy ? 'disabled' : ''} onclick="setOutcome('${esc(e.id)}', ${e.success === false ? 'null' : 'false'})">Fail</button>
+      </span></td>
+      <td><div class="actions">
+        <button class="btn" ${e.has_replay ? '' : 'disabled'} onclick="play('${esc(e.id)}')">Replay</button>
+        <button class="btn danger" ${busy ? 'disabled' : ''} onclick="trashEpisode('${esc(e.id)}')">Delete</button>
+      </div></td></tr>`;
+  }).join('');
+}
+
+async function setOutcome(id, value) {
+  try { await api('/api/episodes/' + encodeURIComponent(id), { success: value }); } catch (e) { toast(e.message); }
+}
+async function renameEpisode(id) {
+  const episode = episodes.find((e) => e.id === id);
+  const name = prompt('Episode name', episode ? episode.name : '');
+  if (name === null || !name.trim()) return;
+  try { await api('/api/episodes/' + encodeURIComponent(id), { name }); } catch (e) { toast(e.message); }
+}
+async function trashEpisode(id) {
+  const episode = episodes.find((e) => e.id === id);
+  if (!confirm(`Delete “${episode ? episode.name : id}”?\nIt is moved to the .trash folder inside the data folder.`)) return;
+  try { await api('/api/episodes/' + encodeURIComponent(id) + '/trash', {}); } catch (e) { toast(e.message); }
+}
+function play(id) {
+  const e = episodes.find((x) => x.id === id);
+  const base = '/episodes/' + encodeURIComponent(id) + '/';
+  $('player-title').textContent = e.name;
+  $('player-task').textContent = e.task ? 'Task: ' + e.task : '';
+  const files = ['replay.mp4', 'meta.json'];
+  for (const [cam, c] of Object.entries(e.cameras || {}))
+    for (const st of Object.values(c.streams || {})) files.push(st.file, st.frames_csv);
+  $('player-files').innerHTML = files.map((f) => `<a href="${base}${encodeURIComponent(f)}" target="_blank">${esc(f)}</a>`).join('');
+  const video = $('player-video');
+  video.src = base + 'replay.mp4';
+  $('player').showModal();
+  video.play().catch(() => {});
+}
+function closePlayer() { const v = $('player-video'); v.pause(); v.removeAttribute('src'); v.load(); $('player').close(); }
+$('player').addEventListener('close', () => { const v = $('player-video'); v.pause(); });
+
+$('recbtn').addEventListener('click', async () => {
+  try { await api('/api/record', { action: status && status.recording ? 'stop' : 'start' }); } catch (e) { toast(e.message); }
+});
+let settingsTimer;
+function pushSettings() {
+  clearTimeout(settingsTimer);
+  settingsTimer = setTimeout(() => api('/api/settings', { task: $('task').value, next_name: $('nextname').value }).catch((e) => toast(e.message)), 300);
+}
+$('task').addEventListener('input', pushSettings);
+$('nextname').addEventListener('input', pushSettings);
+
+async function poll() {
+  try {
+    const s = await api('/api/status');
+    if (status === null) { $('task').value = s.task; $('nextname').value = s.next_name; }
+    else if (status.recording && !s.recording) { $('nextname').value = s.next_name; }
+    renderStatus(s);
+  } catch (e) {
+    chip('chip-teleop', 'Recorder <b>offline</b>', 'bad');
+  }
+  setTimeout(poll, 250);
+}
+poll();
+</script>
+</body>
+</html>

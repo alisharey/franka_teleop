@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Episode recorder with web UI (see franka_teleop_recorder)."""
+import site
+import sys
+
+# ~/.local can hold a numpy 2.x (e.g. for the ZED SDK), which breaks ROS Humble's
+# modules built against the system numpy 1.x (cv2, message arrays). Drop the user
+# site before anything imports numpy.
+_user_site = site.getusersitepackages()
+sys.path[:] = [entry for entry in sys.path if not entry.startswith(_user_site)]
+
+from franka_teleop_recorder.main import main  # noqa: E402
+
+main()

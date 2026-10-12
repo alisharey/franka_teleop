@@ -14,6 +14,9 @@
 #include <franka/robot.h>
 
 #include "diff_ik.h"
+#include "quest_input.h"
+#include "telemetry.h"
+#include "telemoma_policy.h"
 
 #include <algorithm>
 #include <array>
@@ -25,7 +28,9 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -141,6 +146,26 @@ struct Config {
   double gripper_grasp_force_N{};
   double gripper_grasp_epsilon_inner_m{};
   double gripper_grasp_epsilon_outer_m{};
+  // Input device (optional keys): "gamepad" (default) or "quest", the Meta Quest
+  // right controller with TeleMoMa's action (src/telemoma_policy.h).
+  std::string input{"gamepad"};
+  std::string quest_connection{"usb"};       // "usb" or the headset's IP for Wi-Fi ADB
+  double quest_position_gain{5.0};           // twist = gain * TeleMoMa action [1/s]
+  double quest_rotation_gain{5.0};
+  // TeleMoMa's rmat_reorder, controller axes -> robot base axes. TeleMoMa's own
+  // -2, -1, -3 was made for the original (VrApi) oculus_reader app; the Quest 3
+  // app reports OpenXR controller axes (x right, y up, -z forward), for which
+  // 3, 1, 2 maps forward -> -x (toward the base), right -> +y, up -> +z for an
+  // operator standing in front of the robot, facing it. Behind it: -3, -1, 2.
+  std::array<int, 4> quest_axis_reorder{3, 1, 2, 4};
+  double quest_position_scale{1.0};          // TeleMoMa spatial_coeff
+  // Level the VR frame at the reset: keep the controller's heading, take "up"
+  // from the headset (upright and level). false = TeleMoMa exactly (full
+  // controller orientation, so a tilted controller tilts every motion).
+  bool quest_level_frame{true};
+  // Readings older than this pause the arm. Wi-Fi has occasional 100-250 ms
+  // gaps; within this window the arm keeps tracking the last target.
+  int quest_timeout_ms{500};
 };
 
 [[nodiscard]] std::unordered_map<std::string, std::string> read_key_values(const std::string& path) {
@@ -148,14 +173,16 @@ struct Config {
   if (!stream) {
     throw std::runtime_error("cannot open config '" + path + "'");
   }
-  const std::array<std::string, 26> allowed_keys{
+  const std::array<std::string, 34> allowed_keys{
       "robot_ip", "joystick_path", "controller_profile", "deadzone", "max_linear_speed_m_s",
       "max_angular_speed_rad_s", "max_linear_acceleration_m_s2", "max_linear_jerk_m_s3",
       "max_angular_acceleration_rad_s2", "max_angular_jerk_rad_s3", "initial_zero_hold_s",
       "workspace_x_m", "workspace_y_m", "workspace_z_m", "z_down_speed_scale",
       "speed_toggle_axis", "allow_detour", "input_timeout_ms", "gripper_enabled", "gripper_open_width_m",
       "gripper_open_speed_m_s", "gripper_grasp_width_m", "gripper_grasp_speed_m_s",
-      "gripper_grasp_force_N", "gripper_grasp_epsilon_inner_m", "gripper_grasp_epsilon_outer_m"};
+      "gripper_grasp_force_N", "gripper_grasp_epsilon_inner_m", "gripper_grasp_epsilon_outer_m",
+      "input", "quest_connection", "quest_position_gain", "quest_rotation_gain", "quest_axis_reorder",
+      "quest_position_scale", "quest_level_frame", "quest_timeout_ms"};
   std::unordered_map<std::string, std::string> values;
   std::string line;
   size_t line_number = 0;
@@ -201,6 +228,23 @@ struct Config {
     return false;
   }
   throw std::runtime_error("'" + key + "' must be true or false");
+}
+
+void validate_input(const Config& config) {
+  if (config.input != "gamepad" && config.input != "quest") {
+    throw std::runtime_error("input must be 'gamepad' or 'quest'");
+  }
+  if (config.quest_position_gain <= 0.0 || config.quest_rotation_gain <= 0.0 || config.quest_position_scale <= 0.0) {
+    throw std::runtime_error("quest_position_gain, quest_rotation_gain and quest_position_scale must be positive");
+  }
+  std::array<bool, 4> used{};
+  for (const int entry : config.quest_axis_reorder) {
+    const int axis = std::abs(entry);
+    if (axis < 1 || axis > 4 || used[static_cast<size_t>(axis - 1)]) {
+      throw std::runtime_error("quest_axis_reorder must be a signed permutation of 1, 2, 3, 4 (e.g. 3, 1, 2, 4)");
+    }
+    used[static_cast<size_t>(axis - 1)] = true;
+  }
 }
 
 [[nodiscard]] Config load_config(const std::string& path) {
@@ -258,17 +302,54 @@ struct Config {
        config.gripper_grasp_epsilon_outer_m < 0.0)) {
     throw std::runtime_error("enabled gripper widths, speeds, force, and tolerances must define a valid bounded command");
   }
+  const auto optional = [&values](const std::string& key) -> const std::string* {
+    const auto found = values.find(key);
+    return found == values.end() ? nullptr : &found->second;
+  };
+  if (const auto* value = optional("input")) config.input = *value;
+  if (const auto* value = optional("quest_connection")) config.quest_connection = *value;
+  if (const auto* value = optional("quest_position_gain")) config.quest_position_gain = parse_double("quest_position_gain", *value);
+  if (const auto* value = optional("quest_rotation_gain")) config.quest_rotation_gain = parse_double("quest_rotation_gain", *value);
+  if (const auto* value = optional("quest_position_scale")) config.quest_position_scale = parse_double("quest_position_scale", *value);
+  if (const auto* value = optional("quest_level_frame")) config.quest_level_frame = parse_boolean("quest_level_frame", *value);
+  if (const auto* value = optional("quest_timeout_ms")) config.quest_timeout_ms = parse_nonnegative_integer("quest_timeout_ms", *value);
+  if (const auto* value = optional("quest_axis_reorder")) {
+    const auto reorder = parse_array<4>("quest_axis_reorder", *value);
+    for (size_t index = 0; index < 4; ++index) config.quest_axis_reorder[index] = static_cast<int>(reorder[index]);
+  }
+  validate_input(config);
   return config;
 }
 
-class JoystickInput {
+// The teleop's input device: the gamepad or the Meta Quest right controller.
+// Everything is called from the control loop except start().
+class TeleopInput {
+ public:
+  virtual ~TeleopInput() = default;
+  virtual void start() = 0;
+  // Once at the start of every control tick (real-time: must not block).
+  virtual void tick(const franka::RobotState& /*state*/, double /*gripper_open_fraction*/) {}
+  [[nodiscard]] virtual bool healthy() const = 0;
+  [[nodiscard]] virtual std::string fault_reason() const = 0;
+  [[nodiscard]] virtual bool deadman_pressed() const = 0;
+  [[nodiscard]] virtual bool rotation_modifier_pressed() const = 0;
+  [[nodiscard]] virtual double speed_scale() const = 0;
+  // Base-frame twist [m/s, rad/s], before workspace braking.
+  [[nodiscard]] virtual std::array<double, 6> command_twist(const Config& config) const = 0;
+  [[nodiscard]] virtual uint64_t take_gripper_action() = 0;
+  [[nodiscard]] virtual int gripper_action() const = 0;  // 0 none, 1 open, 2 grasp
+  [[nodiscard]] virtual uint64_t gripper_command_count() const = 0;
+  virtual void snapshot(telemetry::Sample& sample) const = 0;
+};
+
+class JoystickInput final : public TeleopInput {
  public:
   explicit JoystickInput(const Config& config) : config_(config) {}
-  ~JoystickInput() { stop(); }
+  ~JoystickInput() override { stop(); }
   JoystickInput(const JoystickInput&) = delete;
   JoystickInput& operator=(const JoystickInput&) = delete;
 
-  void start() {
+  void start() override {
     descriptor_ = open(config_.joystick_path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (descriptor_ < 0) {
       throw std::runtime_error("cannot open joystick '" + config_.joystick_path + "': " + std::strerror(errno));
@@ -298,12 +379,12 @@ class JoystickInput {
     }
   }
 
-  [[nodiscard]] bool deadman_pressed() const { return buttons_[kRightBumper].load(); }
-  [[nodiscard]] bool rotation_modifier_pressed() const {
+  [[nodiscard]] bool deadman_pressed() const override { return buttons_[kRightBumper].load(); }
+  [[nodiscard]] bool rotation_modifier_pressed() const override {
     // Hold L1 (left bumper) or L2 (left trigger) to rotate.
     return buttons_[kLeftBumper].load() || normalized_axis(kLeftTrigger) > 0.5;
   }
-  [[nodiscard]] bool healthy() const {
+  [[nodiscard]] bool healthy() const override {
     return !faulted_.load() && monotonic_time_ms() - heartbeat_ms_.load() <= config_.input_timeout_ms;
   }
   [[nodiscard]] double axis(const size_t index) const {
@@ -315,10 +396,51 @@ class JoystickInput {
     return std::copysign((magnitude - config_.deadzone) / (1.0 - config_.deadzone), normalized);
   }
   // Speed multiplier chosen with the D-pad (like Frankastein's [ / ] step keys).
-  [[nodiscard]] double speed_scale() const { return kSpeedLevels[speed_level_.load()]; }
-  [[nodiscard]] uint64_t take_gripper_action() { return gripper_action_sequence_.exchange(0); }
-  [[nodiscard]] int gripper_action() const { return gripper_action_.load(); }
-  [[nodiscard]] std::string fault_reason() const { return fault_reason_; }
+  [[nodiscard]] double speed_scale() const override { return kSpeedLevels[speed_level_.load()]; }
+  [[nodiscard]] uint64_t take_gripper_action() override { return gripper_action_sequence_.exchange(0); }
+  [[nodiscard]] int gripper_action() const override { return gripper_action_.load(); }
+  [[nodiscard]] uint64_t gripper_command_count() const override { return gripper_command_count_.load(); }
+  // Sticks -> base-frame twist.
+  [[nodiscard]] std::array<double, 6> command_twist(const Config& config) const override {
+    const double scale = speed_scale();
+    const double linear = config.max_linear_speed_m_s * scale;
+    const double angular = config.max_angular_speed_rad_s * scale;
+    std::array<double, 6> velocity{};
+    if (rotation_modifier_pressed()) {
+      velocity = {0.0,
+                  0.0,
+                  0.0,
+                  axis(kLeftStickX) * angular,
+                  -axis(kLeftStickY) * angular,
+                  axis(kRightStickX) * angular};
+    } else {
+      // Right stick up/down -> base X (push up = +X, away from the base);
+      // left stick left/right -> base Y (push right = +Y);
+      // left stick up/down -> base Z (push up = +Z).
+      velocity = {-axis(kRightStickY) * linear,
+                  axis(kLeftStickX) * linear,
+                  -axis(kLeftStickY) * linear,
+                  0.0,
+                  0.0,
+                  0.0};
+      if (velocity[2] < 0.0) {
+        velocity[2] *= config.z_down_speed_scale;  // Frankastein moves down at half speed.
+      }
+    }
+    return velocity;
+  }
+  // Raw axis values and button states, for telemetry.
+  void snapshot(telemetry::Sample& sample) const override {
+    sample.axis_count = std::min<uint8_t>(axis_count_, telemetry::kMaxAxes);
+    sample.button_count = std::min<uint8_t>(button_count_, telemetry::kMaxButtons);
+    for (size_t index = 0; index < sample.axis_count; ++index) {
+      sample.axes[index] = axes_[index].load(std::memory_order_relaxed);
+    }
+    for (size_t index = 0; index < sample.button_count; ++index) {
+      sample.buttons[index] = buttons_[index].load(std::memory_order_relaxed);
+    }
+  }
+  [[nodiscard]] std::string fault_reason() const override { return fault_reason_; }
 
  private:
   [[nodiscard]] double normalized_axis(const size_t index) const {
@@ -373,9 +495,11 @@ class JoystickInput {
             if (event.number == kButtonA) {
               gripper_action_.store(1);
               gripper_action_sequence_.fetch_add(1);
+              gripper_command_count_.fetch_add(1);
             } else if (event.number == kButtonB) {
               gripper_action_.store(2);
               gripper_action_sequence_.fetch_add(1);
+              gripper_command_count_.fetch_add(1);
             }
           }
         }
@@ -398,11 +522,176 @@ class JoystickInput {
   std::atomic<int64_t> heartbeat_ms_{0};
   std::atomic<int> gripper_action_{0};
   std::atomic<uint64_t> gripper_action_sequence_{0};
+  std::atomic<uint64_t> gripper_command_count_{0};
   static constexpr std::array<double, 3> kSpeedLevels{0.25, 0.5, 1.0};
   std::atomic<int> speed_level_{2};
   int speed_toggle_direction_{0};  // Reader thread only.
   std::thread reader_;
   std::string fault_reason_{""};
+};
+
+// Meta Quest right controller (input = quest), TeleMoMa's way: hold the grip
+// to move, the trigger toggles the gripper, B (grip released) re-sets "forward"
+// to the controller's current orientation. Every tick, TeleMoMa's action
+// (src/telemoma_policy.h) is computed against the measured end-effector pose,
+// and the arm is driven toward the target it implies (current + action) with a
+// proportional twist, through the same braking, shaping and IK as the gamepad.
+// Readings that stop arriving pause the arm (not fatal); the reader restarts
+// the headset app. A on the controller is the recorder's start/stop button.
+class QuestTeleopInput final : public TeleopInput {
+ public:
+  explicit QuestTeleopInput(const Config& config)
+      : config_(config),
+        reader_(config.quest_connection),
+        policy_(config.quest_axis_reorder, config.quest_position_scale, config.quest_level_frame) {}
+
+  void start() override {
+    reader_.start();
+    std::cout << "Meta Quest connected (" << reader_.serial() << ").\n";
+  }
+
+  void tick(const franka::RobotState& state, double gripper_open_fraction) override {
+    quest::Reading reading;
+    if (reader_.latest(reading)) {  // keeps the previous one if the reader holds the lock
+      reading_ = reading;
+    }
+    const int64_t now = quest::steady_ns();
+    age_s_ = reading_.sequence == 0 ? 0.0 : static_cast<double>(now - reading_.receive_steady_ns) * 1e-9;
+    fresh_ = reading_.sequence != 0 && age_s_ * 1000.0 <= config_.quest_timeout_ms;
+    if (reading_.sequence != last_sequence_) {
+      last_sequence_ = reading_.sequence;
+      if (reading_.pose_valid) {  // TeleMoMa: `if controller_id not in poses: continue`
+        // TeleMoMa re-sets "forward" on a joystick click (sent by the fixed reader
+        // app, docs/quest_reader_app.md; the original Quest 3 build never sends
+        // it); B does the same. Only with the grip released: a re-set while
+        // moving would make the target jump.
+        const bool reset_forward = (reading_.joystick_click || reading_.b) && !reading_.grip_pressed;
+        policy_.on_reading(reading_.pose, {reading_.grip_pressed, reset_forward, reading_.trigger});
+      }
+    }
+    if (!policy_.has_pose()) {
+      return;
+    }
+    robot_pose_ = row_major(state.O_T_EE);
+    action_ = policy_.calculate_action(robot_pose_, gripper_open_fraction);
+    const int target = policy_.target_gripper();
+    if (target != last_target_gripper_) {  // TeleMoMa's toggle flipped the target
+      last_target_gripper_ = target;
+      gripper_action_.store(target == 1 ? 1 : 2);
+      gripper_action_sequence_.fetch_add(1);
+      gripper_command_count_.fetch_add(1);
+    }
+  }
+
+  [[nodiscard]] bool healthy() const override { return true; }
+  [[nodiscard]] std::string fault_reason() const override { return ""; }
+  [[nodiscard]] bool deadman_pressed() const override {
+    return fresh_ && reading_.pose_valid && policy_.has_pose() && policy_.movement_enabled();
+  }
+  [[nodiscard]] bool rotation_modifier_pressed() const override { return false; }
+  [[nodiscard]] double speed_scale() const override { return 1.0; }
+
+  // Toward target = current + action: twist = gain * action (rotation as a rotation vector).
+  [[nodiscard]] std::array<double, 6> command_twist(const Config& config) const override {
+    if (!deadman_pressed()) {
+      return {};
+    }
+    const telemoma::Vec3 rotation =
+        telemoma::rotation_vector(telemoma::from_euler_xyz({action_[3], action_[4], action_[5]}));
+    std::array<double, 6> twist{};
+    for (size_t axis = 0; axis < 3; ++axis) {
+      twist[axis] = config.quest_position_gain * action_[axis];
+      twist[3 + axis] = config.quest_rotation_gain * rotation[axis];
+    }
+    const double linear = std::hypot(twist[0], twist[1], twist[2]);
+    const double angular = std::hypot(twist[3], twist[4], twist[5]);
+    for (size_t axis = 0; axis < 3; ++axis) {
+      if (linear > config.max_linear_speed_m_s) twist[axis] *= config.max_linear_speed_m_s / linear;
+      if (angular > config.max_angular_speed_rad_s) twist[3 + axis] *= config.max_angular_speed_rad_s / angular;
+    }
+    return twist;
+  }
+
+  [[nodiscard]] uint64_t take_gripper_action() override { return gripper_action_sequence_.exchange(0); }
+  [[nodiscard]] int gripper_action() const override { return gripper_action_.load(); }
+  [[nodiscard]] uint64_t gripper_command_count() const override { return gripper_command_count_.load(); }
+
+  void snapshot(telemetry::Sample& sample) const override {
+    sample.input_kind = 1;
+    telemetry::QuestSample& q = sample.quest;
+    q.reading_valid = reading_.sequence != 0;
+    q.reading_sequence = reading_.sequence;
+    q.reading_age_s = age_s_;
+    q.reading_stamp_ns = reading_.receive_ns;
+    q.right_present = reading_.right_present;
+    q.pose_valid = reading_.pose_valid;
+    q.controller_pose = reading_.pose;
+    q.button_a = reading_.a;
+    q.button_b = reading_.b;
+    q.trigger_pressed = reading_.trigger_pressed;
+    q.grip_pressed = reading_.grip_pressed;
+    q.joystick_click = reading_.joystick_click;
+    q.trigger_touch = reading_.trigger_touch;
+    q.trigger = reading_.trigger;
+    q.grip = reading_.grip;
+    q.joystick = {reading_.joystick_x, reading_.joystick_y};
+    q.policy_active = policy_.has_pose();
+    q.movement_enabled = policy_.movement_enabled();
+    q.action = action_;
+    q.target = target_pose();
+    q.robot_origin = policy_.robot_origin();
+    q.vr_state = policy_.vr_state();
+    q.vr_origin = policy_.vr_origin();
+    q.vr_to_global = policy_.vr_to_global();
+    // /teleop/joy and TeleopState.axes/buttons carry the Quest's in quest mode:
+    // axes [joystick x, joystick y, trigger, grip] (x32767), buttons [A, B, RTr, RG, RJ, RT].
+    const std::array<double, 4> axes{reading_.joystick_x, reading_.joystick_y, reading_.trigger, reading_.grip};
+    sample.axis_count = static_cast<uint8_t>(axes.size());
+    for (size_t index = 0; index < axes.size(); ++index) {
+      sample.axes[index] = static_cast<int16_t>(std::lround(std::clamp(axes[index], -1.0, 1.0) * 32767.0));
+    }
+    const std::array<bool, 6> buttons{reading_.a, reading_.b, reading_.trigger_pressed, reading_.grip_pressed,
+                                      reading_.joystick_click, reading_.trigger_touch};
+    sample.button_count = static_cast<uint8_t>(buttons.size());
+    for (size_t index = 0; index < buttons.size(); ++index) {
+      sample.buttons[index] = buttons[index];
+    }
+  }
+
+ private:
+  static telemoma::Mat4 row_major(const std::array<double, 16>& column_major) {
+    telemoma::Mat4 out{};
+    for (size_t row = 0; row < 4; ++row) {
+      for (size_t col = 0; col < 4; ++col) {
+        out[row * 4 + col] = column_major[col * 4 + row];
+      }
+    }
+    return out;
+  }
+
+  // TeleMoMa's robot side: position + action, rotation R_euler(action) R_robot.
+  telemoma::Mat4 target_pose() const {
+    const telemoma::Mat3 rotation = telemoma::multiply(telemoma::from_euler_xyz({action_[3], action_[4], action_[5]}),
+                                                       telemoma::rotation_of(robot_pose_));
+    return {rotation[0], rotation[1], rotation[2], robot_pose_[3] + action_[0],
+            rotation[3], rotation[4], rotation[5], robot_pose_[7] + action_[1],
+            rotation[6], rotation[7], rotation[8], robot_pose_[11] + action_[2],
+            0.0, 0.0, 0.0, 1.0};
+  }
+
+  const Config& config_;
+  quest::Reader reader_;
+  telemoma::OculusPolicy policy_;
+  quest::Reading reading_;
+  uint64_t last_sequence_{0};
+  bool fresh_{false};
+  double age_s_{0.0};
+  telemoma::Mat4 robot_pose_ = telemoma::identity4();
+  std::array<double, 7> action_{0, 0, 0, 0, 0, 0, 1};
+  int last_target_gripper_{1};  // TeleMoMa starts at 1 (open); no command until it changes
+  std::atomic<int> gripper_action_{0};
+  std::atomic<uint64_t> gripper_action_sequence_{0};
+  std::atomic<uint64_t> gripper_command_count_{0};
 };
 
 // libfranka's own check: only PREEMPT_RT kernels expose /sys/kernel/realtime = 1.
@@ -436,10 +725,14 @@ class JoystickInput {
 }
 
 void print_usage(const char* name) {
-  std::cout << "Usage: " << name << " --config PATH [--check-config | --enable-motion]\n"
+  std::cout << "Usage: " << name << " --config PATH [--input gamepad|quest] [--check-config | --enable-motion]\n"
             << "\n"
             << "--check-config validates configuration only and never contacts hardware.\n"
-            << "--enable-motion requires a held deadman before it opens the robot connection.\n";
+            << "--enable-motion connects to the robot; the arm moves only while RB (gamepad) or the\n"
+            << "right grip (Meta Quest) is held. --input overrides the config's input setting.\n"
+            << "\n"
+            << "While running it publishes ROS 2 topics for recording: /teleop/state (every\n"
+            << "control tick), /teleop/joy and /teleop/session.\n";
 }
 
 // Fixed box in the robot base frame O (same values as Frankastein's
@@ -492,32 +785,8 @@ constexpr double kBrakingAccelerationFraction = 0.5;
 
 [[nodiscard]] std::array<double, 6> bounded_velocity(const franka::RobotState& state,
                                                       const Config& config, const Workspace& workspace,
-                                                      const JoystickInput& input) {
-  const double scale = input.speed_scale();
-  const double linear = config.max_linear_speed_m_s * scale;
-  const double angular = config.max_angular_speed_rad_s * scale;
-  std::array<double, 6> velocity{};
-  if (input.rotation_modifier_pressed()) {
-    velocity = {0.0,
-                0.0,
-                0.0,
-                input.axis(kLeftStickX) * angular,
-                -input.axis(kLeftStickY) * angular,
-                input.axis(kRightStickX) * angular};
-  } else {
-    // Right stick up/down -> base X (push up = +X, away from the base);
-    // left stick left/right -> base Y (push right = +Y);
-    // left stick up/down -> base Z (push up = +Z).
-    velocity = {-input.axis(kRightStickY) * linear,
-                input.axis(kLeftStickX) * linear,
-                -input.axis(kLeftStickY) * linear,
-                0.0,
-                0.0,
-                0.0};
-    if (velocity[2] < 0.0) {
-      velocity[2] *= config.z_down_speed_scale;  // Frankastein moves down at half speed.
-    }
-  }
+                                                      const TeleopInput& input) {
+  std::array<double, 6> velocity = input.command_twist(config);
   for (size_t index = 0; index < 3; ++index) {
     const double position = state.O_T_EE[12 + index];
     const double to_minimum = position - workspace.minimum_m[index];
@@ -720,10 +989,43 @@ template <size_t N>
   });
 }
 
-void run_gripper_worker(std::stop_token stop_token, const Config& config, JoystickInput& input,
-                        std::atomic<bool>& stop_requested, std::atomic<bool>& faulted) {
+// Latest gripper reading, shared lock-free with the control loop's telemetry.
+struct GripperReading {
+  std::atomic<double> width{0.0};
+  std::atomic<double> max_width{0.0};
+  std::atomic<bool> is_grasped{false};
+  std::atomic<uint16_t> temperature{0};
+  std::atomic<double> time_s{0.0};
+};
+
+void run_gripper_worker(std::stop_token stop_token, const Config& config, TeleopInput& input,
+                        std::atomic<bool>& stop_requested, std::atomic<bool>& faulted,
+                        GripperReading& reading) {
   try {
     franka::Gripper gripper(config.robot_ip);
+    // After a power cycle the hand reports max_width ~0 until it is homed, and
+    // it rejects move/grasp commands until then.
+    if (gripper.readOnce().max_width < 0.01) {
+      std::cerr << "\n*** The gripper is NOT HOMED (max width ~0): open/close commands will be rejected.\n"
+                   "*** Home it once (Desk: end effector > Homing, or tools/home_gripper.sh), then restart.\n\n";
+    }
+    // Continuous state reads alongside the (blocking) move/grasp commands on the
+    // same connection, as Franka's own gripper node does. Read failures only end
+    // the readings; a lost connection still faults through the commands below.
+    std::jthread reader([&gripper, &reading, &stop_requested](std::stop_token reader_stop) {
+      try {
+        while (!reader_stop.stop_requested() && !stop_requested.load()) {
+          const franka::GripperState state = gripper.readOnce();
+          reading.width.store(state.width);
+          reading.max_width.store(state.max_width);
+          reading.is_grasped.store(state.is_grasped);
+          reading.temperature.store(state.temperature);
+          reading.time_s.store(state.time.toSec());
+        }
+      } catch (const std::exception& error) {
+        std::cerr << "gripper state reading stopped: " << error.what() << '\n';
+      }
+    });
     while (!stop_token.stop_requested() && !stop_requested.load()) {
       if (input.take_gripper_action() != 0U) {
         const int action = input.gripper_action();
@@ -759,6 +1061,7 @@ void run_gripper_worker(std::stop_token stop_token, const Config& config, Joysti
 int main(int argc, char** argv) {
   try {
     std::optional<std::string> config_path;
+    std::optional<std::string> input_override;
     bool check_config = false;
     bool enable_motion = false;
     for (int index = 1; index < argc; ++index) {
@@ -769,6 +1072,8 @@ int main(int argc, char** argv) {
       }
       if (argument == "--config" && index + 1 < argc) {
         config_path = argv[++index];
+      } else if (argument == "--input" && index + 1 < argc) {
+        input_override = argv[++index];
       } else if (argument == "--check-config") {
         check_config = true;
       } else if (argument == "--enable-motion") {
@@ -780,9 +1085,15 @@ int main(int argc, char** argv) {
     if (!config_path.has_value() || check_config == enable_motion) {
       throw std::runtime_error("supply --config and exactly one of --check-config or --enable-motion");
     }
-    const Config config = load_config(*config_path);
-    std::cout << "configuration is valid; robot_ip=" << config.robot_ip
-              << ", joystick_path=" << config.joystick_path
+    Config loaded = load_config(*config_path);
+    if (input_override.has_value()) {
+      loaded.input = *input_override;
+      validate_input(loaded);
+    }
+    const Config config = loaded;
+    std::cout << "configuration is valid; robot_ip=" << config.robot_ip << ", input=" << config.input
+              << (config.input == "quest" ? ", quest_connection=" + config.quest_connection
+                                          : ", joystick_path=" + config.joystick_path)
               << ", gripper_enabled=" << (config.gripper_enabled ? "true" : "false") << '\n';
     if (check_config) {
       return EXIT_SUCCESS;
@@ -793,20 +1104,34 @@ int main(int argc, char** argv) {
     sigaction(SIGINT, &action, nullptr);
     sigaction(SIGTERM, &action, nullptr);
 
-    JoystickInput input(config);
-    input.start();
-    std::cout << "Hold RB (the right bumper) to arm motion. Releasing RB pauses (the arm holds);\n"
-                 "press RB again to resume. Ctrl-C ends control. D-pad up/down changes speed.\n";
-    const int64_t deadline_ms = monotonic_time_ms() + 10000;
-    while (!input.deadman_pressed() && input.healthy() && g_stop_requested == 0 &&
-           monotonic_time_ms() < deadline_ms) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    // ROS 2 telemetry for recording (/teleop/state, /teleop/joy, /teleop/session).
+    std::ifstream config_stream(*config_path);
+    const std::string config_text((std::istreambuf_iterator<char>(config_stream)),
+                                  std::istreambuf_iterator<char>());
+    const std::unique_ptr<telemetry::Publisher> telemetry_publisher =
+        telemetry::make_publisher({.config_path = *config_path, .config_text = config_text});
+
+    std::unique_ptr<TeleopInput> input;
+    if (config.input == "quest") {
+      input = std::make_unique<QuestTeleopInput>(config);
+    } else {
+      input = std::make_unique<JoystickInput>(config);
     }
-    if (!input.deadman_pressed()) {
-      throw std::runtime_error("RB (the right bumper) was not held within 10 seconds; robot connection was not opened");
+    input->start();
+    if (config.input == "quest") {
+      std::cout << "The arm moves only while the right controller's GRIP is held (TeleMoMa: the target is the\n"
+                   "grip-press pose plus the controller's motion since); releasing it pauses. TRIGGER toggles\n"
+                   "the gripper. B (grip released) re-sets \"forward\" to how you hold the controller now.\n"
+                   "Ctrl-C ends control.\n";
+    } else {
+      std::cout << "The arm moves only while RB (the right bumper) is held; releasing RB pauses (the\n"
+                   "arm holds). Ctrl-C ends control. D-pad up/down changes speed.\n";
     }
-    if (!input.healthy()) {
-      throw std::runtime_error("joystick fault before arm connection: " + input.fault_reason());
+    if (g_stop_requested != 0) {
+      return EXIT_SUCCESS;
+    }
+    if (!input->healthy()) {
+      throw std::runtime_error("input fault before arm connection: " + input->fault_reason());
     }
 
     franka::Robot robot(config.robot_ip, choose_realtime_config());
@@ -835,10 +1160,12 @@ int main(int argc, char** argv) {
 
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> gripper_faulted{false};
+    GripperReading gripper_reading;
     std::optional<std::jthread> gripper_worker;
     if (config.gripper_enabled) {
-      gripper_worker.emplace(run_gripper_worker, std::cref(config), std::ref(input),
-                             std::ref(stop_requested), std::ref(gripper_faulted));
+      gripper_worker.emplace(run_gripper_worker, std::cref(config), std::ref(*input),
+                             std::ref(stop_requested), std::ref(gripper_faulted),
+                             std::ref(gripper_reading));
     }
     std::atomic<int> stop_reason{0};
     double control_elapsed_s = 0.0;
@@ -846,17 +1173,32 @@ int main(int argc, char** argv) {
     diff_ik::Params ik_strict = ik;
     ik_strict.max_task_error = 0.05;
     TwistShaper shaper;
-    std::cout << "Motion enabled. Sticks command base-frame Cartesian velocity; joint velocities come from\n"
-                 "the onboard IK solver. Desk collision behavior is preserved.\n";
+    uint64_t tick = 0;
+    telemetry::Sample sample;  // Reused every tick; filled and copied into the ring.
+    std::cout << "Motion enabled. The input commands a base-frame Cartesian velocity; joint velocities come\n"
+                 "from the onboard IK solver. Desk collision behavior is preserved.\n";
     robot.control(
         [&](const franka::RobotState& state, franka::Duration period) -> franka::JointVelocities {
           control_elapsed_s += period.toSec();
+          sample.stamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                std::chrono::system_clock::now().time_since_epoch())
+                                .count();
+          // TeleMoMa's policy compares against the commanded gripper state
+          // (1 = open, 0 = closed); before any command, the measured opening.
+          const int gripper_command = input->gripper_action();
+          const double max_width = gripper_reading.max_width.load(std::memory_order_relaxed);
+          const double gripper_open_fraction =
+              gripper_command == 2 ? 0.0
+              : gripper_command == 1 ? 1.0
+              : max_width > 0.0 ? gripper_reading.width.load(std::memory_order_relaxed) / max_width
+                                : 1.0;
+          input->tick(state, gripper_open_fraction);
           bool stopping = false;
           if (g_stop_requested != 0) {
             stop_reason.store(1);
             stopping = true;
           }
-          if (!stopping && !input.healthy()) {
+          if (!stopping && !input->healthy()) {
             stop_reason.store(2);
             stopping = true;
           }
@@ -866,10 +1208,11 @@ int main(int argc, char** argv) {
           }
           // RB released = pause: command zero velocity (the S-curve brings the arm
           // smoothly to rest) but keep the session open so RB resumes instantly.
-          const bool paused = !input.deadman_pressed();
+          const bool paused = !input->deadman_pressed();
           std::array<double, 6> target_twist{};
-          if (!stopping && !paused && control_elapsed_s >= config.initial_zero_hold_s) {
-            target_twist = bounded_velocity(state, config, workspace, input);
+          const bool motion_enabled = !stopping && !paused && control_elapsed_s >= config.initial_zero_hold_s;
+          if (motion_enabled) {
+            target_twist = bounded_velocity(state, config, workspace, *input);
           }
           // 1. Smooth S-curve in Cartesian space.
           const std::array<double, 6> twist = shaper.step(target_twist, config);
@@ -895,6 +1238,8 @@ int main(int argc, char** argv) {
                        std::hypot(twist[3], twist[4], twist[5]) / config.max_angular_speed_rad_s);
           const double nullspace_weight = std::clamp(activity / kNullspaceFullActivity, 0.0, 1.0);
           std::array<double, 7> joint_velocity{};
+          double applied_fence_scale = 1.0;
+          bool strict_used = false;
           if (!near_zero(twist)) {
             const std::array<double, 42> jacobian = model.zeroJacobian(franka::Frame::kEndEffector, state);
             // 3b. Keep the resulting gripper motion (including any detour) inside the box.
@@ -922,9 +1267,10 @@ int main(int argc, char** argv) {
               // The detour runs into a wall (e.g. in a corner): the exact-direction
               // solution may still make progress where the detour cannot.
               auto [strict_dq, strict_scale] = solve_fenced(ik_strict);
-              (void)strict_scale;
               if (progress(strict_dq) > progress(dq)) {
                 dq = strict_dq;
+                scale = strict_scale;
+                strict_used = true;
               }
             }
             // Never move against the push: when the push is impossible from this pose,
@@ -933,6 +1279,7 @@ int main(int argc, char** argv) {
               dq = {};
             }
             joint_velocity = dq;
+            applied_fence_scale = scale;
           }
 
           // 4. Joint-space S-curve, then the hard safety clip with the robot's
@@ -941,6 +1288,32 @@ int main(int argc, char** argv) {
               robot.getUpperJointVelocityLimits(state.q_d), robot.getLowerJointVelocityLimits(state.q_d),
               franka::kMaxJointAcceleration, franka::kMaxJointJerk, shape_joint_velocity(joint_velocity, state),
               state.dq_d, state.ddq_d);
+
+          // 5. Telemetry: copy this tick into the lock-free ring (never blocks).
+          sample.tick = tick++;
+          sample.period_s = period.toSec();
+          sample.state = state;
+          sample.deadman = !paused;
+          sample.rotation_mode = input->rotation_modifier_pressed();
+          sample.motion_enabled = motion_enabled;
+          sample.speed_scale = input->speed_scale();
+          sample.target_twist = target_twist;
+          sample.shaped_twist = twist;
+          sample.ik_dq = joint_velocity;
+          sample.fence_scale = applied_fence_scale;
+          sample.nullspace_weight = nullspace_weight;
+          sample.ik_strict_used = strict_used;
+          sample.commanded_dq = limited;
+          input->snapshot(sample);
+          sample.gripper_command = static_cast<uint8_t>(input->gripper_action());
+          sample.gripper_command_count = input->gripper_command_count();
+          sample.gripper_width = gripper_reading.width.load(std::memory_order_relaxed);
+          sample.gripper_max_width = gripper_reading.max_width.load(std::memory_order_relaxed);
+          sample.gripper_is_grasped = gripper_reading.is_grasped.load(std::memory_order_relaxed);
+          sample.gripper_temperature = gripper_reading.temperature.load(std::memory_order_relaxed);
+          sample.gripper_time_s = gripper_reading.time_s.load(std::memory_order_relaxed);
+          telemetry_publisher->push(sample);
+
           // libfranka's joint limiter settles into a +/-1e-5 rad/s dither around zero.
           if (stopping && near_zero(twist) && near_zero(limited, 1e-4)) {
             return franka::MotionFinished(franka::JointVelocities(limited));
@@ -956,8 +1329,8 @@ int main(int argc, char** argv) {
     if (gripper_faulted.load()) {
       throw std::runtime_error("stopped after a parallel-gripper fault");
     }
-    if (!input.healthy()) {
-      throw std::runtime_error("stopped after joystick fault: " + input.fault_reason());
+    if (!input->healthy()) {
+      throw std::runtime_error("stopped after joystick fault: " + input->fault_reason());
     }
     if (stop_reason.load() == 1) {
       std::cout << "Motion ended safely: software stop requested.\n";

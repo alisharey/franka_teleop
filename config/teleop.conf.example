@@ -58,3 +58,15 @@ gripper_grasp_force_N = 50.0
 # The wide outer tolerance lets a grasp on any object succeed (Frankastein).
 gripper_grasp_epsilon_inner_m = 0.005
 gripper_grasp_epsilon_outer_m = 0.08
+
+# ---- Meta Quest input (optional; ./record.sh --quest or --input quest) ----
+# input = gamepad                      # or quest
+# quest_connection = usb               # or the headset's IP (tools/quest/quest_wifi.sh)
+# quest_timeout_ms = 500               # older readings pause the arm (Wi-Fi has brief gaps)
+# quest_position_gain = 5.0            # twist = gain * TeleMoMa action [1/s]
+# quest_rotation_gain = 5.0
+# quest_axis_reorder = 3, 1, 2, 4      # controller -> robot axes: standing in front of the robot,
+#                                      # facing it (default); behind it, facing its front: -3, -1, 2, 4
+# quest_position_scale = 1.0           # TeleMoMa's spatial_coeff
+# quest_level_frame = true             # reset keeps only the controller's heading, "up" from the
+#                                      # headset (upright, level); false = TeleMoMa's full tilt

@@ -1,0 +1,41 @@
+# Recording setup, read by launch/recording.launch.py (camera drivers) and the
+# recorder node. Edit and restart the launch; no rebuild needed.
+
+# Episodes are written here, one folder per episode.
+data_dir: ~/franka_teleop_data
+
+# Web UI. 127.0.0.1 = this PC only; 0.0.0.0 also allows other machines on the network.
+http_host: 127.0.0.1
+http_port: 8765
+
+# Gamepad button that starts/stops a recording (Linux button number; Y is 4 on
+# the xbox_android_standard profile, confirm with controller_probe). It works
+# while gamepad_teleop is running, since the teleop publishes the gamepad.
+record_button: 4
+# The same for the Meta Quest (teleop input = quest): index into the Quest's
+# /teleop/joy buttons [A, B, trigger, grip, joystick click, trigger touch]; 0 = A.
+quest_record_button: 0
+
+# ROS bag storage for everything except images: mcap (zstd-compressed, opens in
+# Foxglove) or sqlite3. Falls back to sqlite3 if the mcap plugin is missing.
+bag_storage: mcap
+
+# Both RealSense D435i. Rename them to match where they are mounted (e.g. wrist,
+# front); the name becomes the topic namespace /cameras/<name>/... and the file prefix.
+cameras:
+  - name: cam_1
+    serial: "939622075305"
+  - name: cam_2
+    serial: "337122071258"
+
+camera:
+  width: 640
+  height: 480
+  fps: 30
+  depth: true          # depth aligned to color, stored losslessly (16-bit FFV1)
+  imu: false           # D435i gyro + accelerometer into the bag
+  initial_reset: true  # hardware-reset the cameras at start (clears a stuck stream; adds a few seconds)
+
+video:
+  color_crf: 18        # H.264 quality: lower = better and bigger; 18 is visually lossless
+  color_preset: veryfast

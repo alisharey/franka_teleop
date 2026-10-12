@@ -1,0 +1,4 @@
+.venv/
+snapshots/
+references/
+__pycache__/

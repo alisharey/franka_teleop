@@ -25,6 +25,7 @@ for f in control_types duration errors exception rate_limiting control_tools; do
 done
 g++ -std=c++20 -O2 $INC -c src/gamepad_teleop.cpp -o /tmp/simbuild/teleop.o
 g++ -std=c++20 -O2 $INC -c tests/sim/fake_franka.cpp -o /tmp/simbuild/fake.o
+g++ -std=c++20 -O2 $INC -c tests/sim/null_telemetry.cpp -o /tmp/simbuild/null_telemetry.o
 g++ /tmp/simbuild/*.o -o /tmp/sim_teleop -Wl,--wrap=ioctl -lpthread
 tests/sim/run_sim_session.sh /tmp/sim_teleop /tmp/simrun   # about 30 s, real time
 ```

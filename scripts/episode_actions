@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+"""Episode -> delta end-effector pose actions file for episode_replay (see replay.sh)."""
+import site
+import sys
+
+_user_site = site.getusersitepackages()  # ~/.local numpy 2.x breaks ROS Humble (see scripts/recorder)
+sys.path[:] = [entry for entry in sys.path if not entry.startswith(_user_site)]
+
+import argparse  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+import numpy as np  # noqa: E402
+
+from franka_teleop_recorder.actions import (delta_pose_actions, integrate, load_states,  # noqa: E402
+                                            matrix_from_quaternion, read_teleop_config, rotation_log,
+                                            write_actions_file)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('episode', help='episode folder')
+    parser.add_argument('--rate', type=float, default=15.0, help='action rate in Hz (default 15)')
+    parser.add_argument('--teleop-config', required=True, help='config/teleop.conf (robot, limits, gripper)')
+    parser.add_argument('--out', required=True, help='actions file to write')
+    args = parser.parse_args()
+
+    episode = Path(args.episode)
+    states = load_states(episode)
+    config = read_teleop_config(args.teleop_config)
+    actions = delta_pose_actions(states, args.rate, float(config.get('gripper_open_width_m', 0.08)))
+
+    # Self-check: the actions, applied in order, must land exactly on the recorded samples.
+    positions, final_rotation = integrate(actions)
+    drift_mm = np.abs(positions - actions['positions']).max() * 1000
+    drift_deg = np.degrees(np.linalg.norm(rotation_log(
+        final_rotation @ matrix_from_quaternion(actions['quaternions'][-1]).T)))
+    step_mm = np.linalg.norm(actions['dp'], axis=1) * 1000
+    step_deg = np.degrees(np.linalg.norm(actions['dr'], axis=1))
+    changes = int(np.count_nonzero(np.diff(actions['gripper'])))
+    write_actions_file(args.out, episode.name, actions, config)
+    print('%s: %d actions at %g Hz (%.1f s), path %.3f m, largest step %.1f mm / %.2f deg, '
+          'gripper %s at start with %d change(s); integration check %.1e mm / %.1e deg'
+          % (episode.name, len(actions['dp']), args.rate, len(actions['dp']) / args.rate,
+             step_mm.sum() / 1000, step_mm.max(), step_deg.max(),
+             'closed' if actions['gripper'][0] else 'open', changes, drift_mm, drift_deg))
+
+
+main()
