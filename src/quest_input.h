@@ -159,8 +159,21 @@ class Reader {
                                  "); enable Wi-Fi ADB once over USB with tools/quest/quest_wifi.sh");
       }
     }
+    // Over Wi-Fi the headset asks again to allow debugging (e.g. after it forgot
+    // "Always allow"); every command fails until then, so say that, not "no app".
+    std::stringstream listing(run({"devices"}));
+    std::string entry;
+    while (std::getline(listing, entry)) {
+      std::stringstream fields(entry);
+      std::string serial, state;
+      fields >> serial >> state;
+      if (serial == serial_ && state != "device") {
+        throw std::runtime_error("the Quest (" + serial_ + ") is " + state +
+                                 ": put the headset on and accept \"Allow debugging\" (tick \"Always allow\")");
+      }
+    }
     if (run({"-s", serial_, "shell", "pm", "list", "packages", kPackage}).find(kPackage) == std::string::npos) {
-      throw std::runtime_error("the oculus_reader app is not installed on the Quest; run tools/quest/quest_monitor.py once");
+      throw std::runtime_error("the oculus_reader app is not installed on the Quest; see run_teleop.md (Setting up a Quest)");
     }
     keep_awake();
     // Only when not running: re-launching a running instance makes the Quest 3

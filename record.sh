@@ -10,6 +10,7 @@
 #   ./record.sh --no-browser    # don't open the web UI
 #   ./record.sh --no-teleop     # cameras + recorder only
 #   ./record.sh --quest         # Meta Quest right controller instead of the gamepad
+#   ./record.sh --policy        # a trained policy drives the arm (run vla/baku/deploy.sh too)
 set -uo pipefail
 
 cd "$(dirname "$(readlink -f "$0")")"
@@ -23,7 +24,8 @@ for argument in "$@"; do
     --no-browser) OPEN_BROWSER=0 ;;
     --no-teleop) RUN_TELEOP=0 ;;
     --quest) INPUT=quest ;;
-    -h|--help) sed -n '2,12p' "$0" | cut -c3-; exit 0 ;;
+    --policy) INPUT=policy ;;
+    -h|--help) sed -n '2,13p' "$0" | cut -c3-; exit 0 ;;
     *) echo "unknown option: $argument (see --help)"; exit 2 ;;
   esac
 done
@@ -102,7 +104,10 @@ fi
 TELEOP=install/franka_teleop/lib/franka_teleop/gamepad_teleop
 while true; do
   echo
-  if [[ $INPUT == quest ]]; then
+  if [[ $INPUT == policy ]]; then
+    echo "Starting the teleop for a policy: in a second terminal run vla/baku/deploy.sh <snapshot> --record $URL"
+    echo "(Enter there starts/stops a rollout). Ctrl-C here ends the teleop. Keep the stop button in reach."
+  elif [[ $INPUT == quest ]]; then
     echo "Starting the teleop with the Meta Quest: hold the right GRIP to move, TRIGGER toggles the gripper,"
     echo "A starts/stops a recording; Ctrl-C ends the teleop."
   else

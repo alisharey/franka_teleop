@@ -15,7 +15,8 @@ forward; defaults quest_axis_reorder 3, 1, 2, 4 and quest_level_frame true):
            horizontal heading (trigger pulled at 7.0-7.3 s: gripper toggle)
   9-11 s   grip held, still
   11-13 s  grip held, turns 20 deg about vertical          -> robot turns 20 deg about base +z
-  13- s    grip held, still
+  13-13.5  grip held, still
+  13.5- s  grip released; 14.0-14.25 s stick flicked down  -> arm returns to home_joints
 """
 import math
 import signal
@@ -67,13 +68,14 @@ elif command == 'logcat':
         pose = np.eye(4)
         pose[:3, :3] = rot([0, 1, 0], angle) @ r0      # turn about vertical
         pose[:3, 3] = p0 + level @ local                # up / back along the heading
-        grip = 2 <= t < 5 or t >= 6.5
+        grip = 2 <= t < 5 or 6.5 <= t < 13.5
+        stick_y = -1.0 if 14.0 <= t < 14.25 else 0.0
         trigger = 1.0 if 7.0 <= t < 7.3 else 0.0
         values = ' '.join('%.6f' % v for v in pose.ravel())
         identity = ' '.join('%g' % v for v in np.eye(4).ravel())
         buttons = 'R,' + ('RG,' if grip else '') + ('RTr,' if trigger > 0.25 else '') + \
-            'rightJS 0.000000 0.000000,rightTrig %.6f,rightGrip %.6f,L,leftJS 0 0,leftTrig 0,leftGrip 0' % (
-                trigger, 1.0 if grip else 0.0)
+            'rightJS 0.000000 %.6f,rightTrig %.6f,rightGrip %.6f,L,leftJS 0 0,leftTrig 0,leftGrip 0' % (
+                stick_y, trigger, 1.0 if grip else 0.0)
         sys.stdout.write('10-12 17:00:00.000  4242  4243 I wE9ryARX: l:%s|r:%s &%s\n' % (identity, values, buttons))
         sys.stdout.flush()
         time.sleep(1 / 72)

@@ -60,7 +60,8 @@ struct Sample {
   std::array<double, 7> ik_dq{};
   std::array<double, 7> commanded_dq{};
   // Input device: 0 = gamepad, 1 = Meta Quest (then `quest` is filled and the
-  // axes/buttons below carry the Quest's, see ros_telemetry.cpp).
+  // axes/buttons below carry the Quest's, see ros_telemetry.cpp), 2 = policy
+  // (quest.action/target/movement_enabled/reading_* only, no axes/buttons).
   uint8_t input_kind{};
   QuestSample quest{};
   // Raw gamepad.

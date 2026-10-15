@@ -1,0 +1,4 @@
+[submodule "vla/BAKU"]
+	path = vla/BAKU
+	url = https://github.com/alisharey/BAKU.git
+	branch = franka-teleop

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Switches the Quest to Wi-Fi ADB. Run it with the USB cable plugged in, once
-# after every headset restart; then the cable can come out. The Quest and this
+# Switches the Quest to Wi-Fi ADB and keeps it awake when not worn. Run it with
+# the USB cable plugged in, once after every headset restart; then the cable can
+# come out. The Quest and this
 # PC must be on the same network and allowed to reach each other (many
 # university networks block that; a lab router or hotspot works).
 set -euo pipefail
@@ -21,6 +22,11 @@ sleep 1
 STATE=$(adb devices | awk -v d="$IP:5555" '$1 == d {print $2}')
 if [[ $STATE == device ]]; then
   echo "Wi-Fi ADB is on. Headset IP: $IP"
+  # Keep the headset awake when it is not worn (proximity-sensor override; the
+  # teleop and monitor renew it while they run). Undo: quest_monitor.py --restore
+  adb -s "$IP:5555" shell input keyevent KEYCODE_WAKEUP > /dev/null 2>&1 || true
+  adb -s "$IP:5555" shell am broadcast -a com.oculus.vrpowermanager.prox_close > /dev/null 2>&1 || true
+  echo "Headset set to stay awake when taken off (until it restarts)."
 elif [[ $STATE == unauthorized ]]; then
   echo "The headset ($IP) asks to allow debugging for the Wi-Fi connection: put it on, tick"
   echo "\"Always allow\" and accept, then check with: adb devices"

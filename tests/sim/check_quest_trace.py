@@ -37,4 +37,9 @@ check(abs(dx - 50) < 4 and abs(dy) < 4 and abs(dz) < 4,
 dyaw = (at(14.5)['yaw'] - at(10.8)['yaw']) * 180 / 3.141592653589793
 print('grip + controller turned 20 deg about vertical: tool heading changed %+.1f deg' % dyaw)
 check(abs(dyaw - 20) < 2, 'turning the controller turns the gripper about base +z (20 deg)')
+home = [0.036286, -1.367388, -0.180505, -2.794799, -0.043301, 2.076045, 0.407056]
+moved_away = max(abs(at(13.5)['j%d' % (i + 1)] - home[i]) for i in range(7))
+final = max(abs(rows[-1]['j%d' % (i + 1)] - home[i]) for i in range(7))
+print('stick flick (grip released): joints were up to %.3f rad from home, finally %.4f rad' % (moved_away, final))
+check(moved_away > 0.05 and final < 0.003, 'flick down returns the arm to the saved home joints')
 sys.exit(1 if failures else 0)

@@ -14,6 +14,7 @@
 #include <franka/robot.h>
 
 #include "diff_ik.h"
+#include "policy_input.h"
 #include "quest_input.h"
 #include "telemetry.h"
 #include "telemoma_policy.h"
@@ -27,6 +28,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -159,6 +161,7 @@ struct Config {
   // operator standing in front of the robot, facing it. Behind it: -3, -1, 2.
   std::array<int, 4> quest_axis_reorder{3, 1, 2, 4};
   double quest_position_scale{1.0};          // TeleMoMa spatial_coeff
+  double quest_rotation_scale{1.0};          // gripper rotation = this x the hand's (1 = TeleMoMa)
   // Level the VR frame at the reset: keep the controller's heading, take "up"
   // from the headset (upright and level). false = TeleMoMa exactly (full
   // controller orientation, so a tilted controller tilts every motion).
@@ -166,6 +169,16 @@ struct Config {
   // Readings older than this pause the arm. Wi-Fi has occasional 100-250 ms
   // gaps; within this window the arm keeps tracking the last target.
   int quest_timeout_ms{500};
+  // Home pose (optional, tools/save_home_pose.sh): a downward flick of the
+  // Quest stick (grip released) moves the arm there in joint space.
+  bool has_home{false};
+  std::array<double, 7> home_joints{};
+  // input = policy: TeleMoMa actions from a learned policy (vla/baku/baku/franka/deploy.py)
+  // over UDP on this PC, executed with the Quest's gains so the arm responds as it did
+  // while recording the demonstrations.
+  std::string policy_host{"127.0.0.1"};
+  int policy_port{47820};
+  int policy_timeout_ms{300};  // no action for this long pauses the arm
 };
 
 [[nodiscard]] std::unordered_map<std::string, std::string> read_key_values(const std::string& path) {
@@ -173,7 +186,7 @@ struct Config {
   if (!stream) {
     throw std::runtime_error("cannot open config '" + path + "'");
   }
-  const std::array<std::string, 34> allowed_keys{
+  const std::array<std::string, 39> allowed_keys{
       "robot_ip", "joystick_path", "controller_profile", "deadzone", "max_linear_speed_m_s",
       "max_angular_speed_rad_s", "max_linear_acceleration_m_s2", "max_linear_jerk_m_s3",
       "max_angular_acceleration_rad_s2", "max_angular_jerk_rad_s3", "initial_zero_hold_s",
@@ -182,7 +195,8 @@ struct Config {
       "gripper_open_speed_m_s", "gripper_grasp_width_m", "gripper_grasp_speed_m_s",
       "gripper_grasp_force_N", "gripper_grasp_epsilon_inner_m", "gripper_grasp_epsilon_outer_m",
       "input", "quest_connection", "quest_position_gain", "quest_rotation_gain", "quest_axis_reorder",
-      "quest_position_scale", "quest_level_frame", "quest_timeout_ms"};
+      "quest_position_scale", "quest_level_frame", "quest_timeout_ms", "home_joints", "quest_rotation_scale",
+      "policy_host", "policy_port", "policy_timeout_ms"};
   std::unordered_map<std::string, std::string> values;
   std::string line;
   size_t line_number = 0;
@@ -231,11 +245,15 @@ struct Config {
 }
 
 void validate_input(const Config& config) {
-  if (config.input != "gamepad" && config.input != "quest") {
-    throw std::runtime_error("input must be 'gamepad' or 'quest'");
+  if (config.input != "gamepad" && config.input != "quest" && config.input != "policy") {
+    throw std::runtime_error("input must be 'gamepad', 'quest' or 'policy'");
   }
-  if (config.quest_position_gain <= 0.0 || config.quest_rotation_gain <= 0.0 || config.quest_position_scale <= 0.0) {
-    throw std::runtime_error("quest_position_gain, quest_rotation_gain and quest_position_scale must be positive");
+  if (config.policy_port < 1 || config.policy_port > 65535 || config.policy_timeout_ms <= 0) {
+    throw std::runtime_error("policy_port must be 1..65535 and policy_timeout_ms positive");
+  }
+  if (config.quest_position_gain <= 0.0 || config.quest_rotation_gain <= 0.0 || config.quest_position_scale <= 0.0 ||
+      config.quest_rotation_scale <= 0.0 || config.quest_rotation_scale > 3.0) {
+    throw std::runtime_error("quest gains and quest_position_scale must be positive; quest_rotation_scale in (0, 3]");
   }
   std::array<bool, 4> used{};
   for (const int entry : config.quest_axis_reorder) {
@@ -311,8 +329,16 @@ void validate_input(const Config& config) {
   if (const auto* value = optional("quest_position_gain")) config.quest_position_gain = parse_double("quest_position_gain", *value);
   if (const auto* value = optional("quest_rotation_gain")) config.quest_rotation_gain = parse_double("quest_rotation_gain", *value);
   if (const auto* value = optional("quest_position_scale")) config.quest_position_scale = parse_double("quest_position_scale", *value);
+  if (const auto* value = optional("quest_rotation_scale")) config.quest_rotation_scale = parse_double("quest_rotation_scale", *value);
   if (const auto* value = optional("quest_level_frame")) config.quest_level_frame = parse_boolean("quest_level_frame", *value);
   if (const auto* value = optional("quest_timeout_ms")) config.quest_timeout_ms = parse_nonnegative_integer("quest_timeout_ms", *value);
+  if (const auto* value = optional("policy_host")) config.policy_host = *value;
+  if (const auto* value = optional("policy_port")) config.policy_port = parse_nonnegative_integer("policy_port", *value);
+  if (const auto* value = optional("policy_timeout_ms")) config.policy_timeout_ms = parse_nonnegative_integer("policy_timeout_ms", *value);
+  if (const auto* value = optional("home_joints")) {
+    config.home_joints = parse_array<7>("home_joints", *value);
+    config.has_home = true;
+  }
   if (const auto* value = optional("quest_axis_reorder")) {
     const auto reorder = parse_array<4>("quest_axis_reorder", *value);
     for (size_t index = 0; index < 4; ++index) config.quest_axis_reorder[index] = static_cast<int>(reorder[index]);
@@ -339,6 +365,8 @@ class TeleopInput {
   [[nodiscard]] virtual uint64_t take_gripper_action() = 0;
   [[nodiscard]] virtual int gripper_action() const = 0;  // 0 none, 1 open, 2 grasp
   [[nodiscard]] virtual uint64_t gripper_command_count() const = 0;
+  // Counts "go to the home pose" requests (Quest: downward stick flick).
+  [[nodiscard]] virtual uint64_t home_requests() const { return 0; }
   virtual void snapshot(telemetry::Sample& sample) const = 0;
 };
 
@@ -543,7 +571,8 @@ class QuestTeleopInput final : public TeleopInput {
   explicit QuestTeleopInput(const Config& config)
       : config_(config),
         reader_(config.quest_connection),
-        policy_(config.quest_axis_reorder, config.quest_position_scale, config.quest_level_frame) {}
+        policy_(config.quest_axis_reorder, config.quest_position_scale, config.quest_level_frame,
+                config.quest_rotation_scale) {}
 
   void start() override {
     reader_.start();
@@ -560,6 +589,12 @@ class QuestTeleopInput final : public TeleopInput {
     fresh_ = reading_.sequence != 0 && age_s_ * 1000.0 <= config_.quest_timeout_ms;
     if (reading_.sequence != last_sequence_) {
       last_sequence_ = reading_.sequence;
+      // Downward flick of the stick, grip released: request the home pose.
+      const bool stick_down = reading_.joystick_y < -0.7;
+      if (stick_down && !stick_was_down_ && !reading_.grip_pressed) {
+        ++home_requests_;
+      }
+      stick_was_down_ = stick_down || (stick_was_down_ && reading_.joystick_y < -0.3);
       if (reading_.pose_valid) {  // TeleMoMa: `if controller_id not in poses: continue`
         // TeleMoMa re-sets "forward" on a joystick click (sent by the fixed reader
         // app, docs/quest_reader_app.md; the original Quest 3 build never sends
@@ -574,9 +609,8 @@ class QuestTeleopInput final : public TeleopInput {
     }
     robot_pose_ = row_major(state.O_T_EE);
     action_ = policy_.calculate_action(robot_pose_, gripper_open_fraction);
-    const int target = policy_.target_gripper();
-    if (target != last_target_gripper_) {  // TeleMoMa's toggle flipped the target
-      last_target_gripper_ = target;
+    if (policy_.take_gripper_toggled()) {  // every trigger toggle sends TeleMoMa's target
+      const int target = policy_.target_gripper();
       gripper_action_.store(target == 1 ? 1 : 2);
       gripper_action_sequence_.fetch_add(1);
       gripper_command_count_.fetch_add(1);
@@ -585,6 +619,7 @@ class QuestTeleopInput final : public TeleopInput {
 
   [[nodiscard]] bool healthy() const override { return true; }
   [[nodiscard]] std::string fault_reason() const override { return ""; }
+  [[nodiscard]] uint64_t home_requests() const override { return home_requests_; }
   [[nodiscard]] bool deadman_pressed() const override {
     return fresh_ && reading_.pose_valid && policy_.has_pose() && policy_.movement_enabled();
   }
@@ -686,9 +721,146 @@ class QuestTeleopInput final : public TeleopInput {
   uint64_t last_sequence_{0};
   bool fresh_{false};
   double age_s_{0.0};
+  bool stick_was_down_{false};
+  uint64_t home_requests_{0};
   telemoma::Mat4 robot_pose_ = telemoma::identity4();
   std::array<double, 7> action_{0, 0, 0, 0, 0, 0, 1};
-  int last_target_gripper_{1};  // TeleMoMa starts at 1 (open); no command until it changes
+  std::atomic<int> gripper_action_{0};
+  std::atomic<uint64_t> gripper_action_sequence_{0};
+  std::atomic<uint64_t> gripper_command_count_{0};
+};
+
+// Learned policy (input = policy): TeleMoMa actions over UDP (src/policy_input.h).
+// Each new action sets a target the way TeleMoMa's robot side builds it, from the
+// pose when the action arrives: position + action, R_euler(action) R_robot. Every
+// tick the arm is driven toward that target with the Quest's gains and limits, the
+// same tracking that executed the demonstrations (there the target moved with the
+// hand; here it moves at the policy rate).
+class PolicyTeleopInput final : public TeleopInput {
+ public:
+  explicit PolicyTeleopInput(const Config& config)
+      : config_(config), receiver_(config.policy_host, config.policy_port) {}
+
+  void start() override {
+    receiver_.start();
+    std::cout << "Waiting for policy actions on udp://" << config_.policy_host << ':' << config_.policy_port
+              << " (vla/baku/baku/franka/deploy.py).\n";
+  }
+
+  void tick(const franka::RobotState& state, double /*gripper_open_fraction*/) override {
+    policy_link::Packet packet;
+    if (receiver_.latest(packet)) {  // keeps the previous one if the reader holds the lock
+      packet_ = packet;
+    }
+    for (size_t row = 0; row < 3; ++row) {
+      for (size_t col = 0; col < 3; ++col) robot_rotation_[row * 3 + col] = state.O_T_EE[col * 4 + row];
+      robot_position_[row] = state.O_T_EE[12 + row];
+    }
+    age_s_ = packet_.sequence == 0
+                 ? 0.0
+                 : static_cast<double>(policy_link::steady_ns() - packet_.receive_steady_ns) * 1e-9;
+    fresh_ = packet_.sequence != 0 && age_s_ * 1000.0 <= config_.policy_timeout_ms;
+    if (packet_.sequence != last_sequence_) {
+      last_sequence_ = packet_.sequence;
+      // Home requests count up per sender; a restarted sender (lower count) re-syncs silently.
+      if (packet_.home_requests > sender_home_requests_) {
+        home_requests_ += packet_.home_requests - sender_home_requests_;
+      }
+      sender_home_requests_ = packet_.home_requests;
+      const auto& a = packet_.action;
+      for (size_t axis = 0; axis < 3; ++axis) target_position_[axis] = robot_position_[axis] + a[axis];
+      target_rotation_ = telemoma::multiply(telemoma::from_euler_xyz({a[3], a[4], a[5]}), robot_rotation_);
+      has_target_ = true;
+      // Gripper target (1 open, 0 closed) with hysteresis: temporal aggregation
+      // averages it, so it passes 0.5 gradually.
+      if (packet_.enabled) {
+        const int current = gripper_action_.load();
+        const int wanted = a[6] >= 0.65 ? 1 : a[6] <= 0.35 ? 2 : current;
+        if (wanted != 0 && wanted != current) {
+          gripper_action_.store(wanted);
+          gripper_action_sequence_.fetch_add(1);
+          gripper_command_count_.fetch_add(1);
+        }
+      }
+    }
+    if (!has_target_) {
+      return;
+    }
+    // The tracking error in TeleMoMa's action form (what /teleop/quest records).
+    const telemoma::Mat3 error = telemoma::multiply(target_rotation_, telemoma::transpose(robot_rotation_));
+    const telemoma::Vec3 euler = telemoma::euler_xyz(error);
+    rotation_error_ = telemoma::rotation_vector(error);
+    for (size_t axis = 0; axis < 3; ++axis) {
+      action_[axis] = std::clamp(target_position_[axis] - robot_position_[axis], -1.0, 1.0);
+      action_[3 + axis] = std::clamp(euler[axis], -1.0, 1.0);
+    }
+    action_[6] = packet_.action[6];
+  }
+
+  [[nodiscard]] bool healthy() const override { return true; }
+  [[nodiscard]] std::string fault_reason() const override { return ""; }
+  [[nodiscard]] uint64_t home_requests() const override { return home_requests_; }
+  [[nodiscard]] bool deadman_pressed() const override { return fresh_ && packet_.enabled && has_target_; }
+  [[nodiscard]] bool rotation_modifier_pressed() const override { return false; }
+  [[nodiscard]] double speed_scale() const override { return 1.0; }
+
+  [[nodiscard]] std::array<double, 6> command_twist(const Config& config) const override {
+    if (!deadman_pressed()) {
+      return {};
+    }
+    std::array<double, 6> twist{};
+    for (size_t axis = 0; axis < 3; ++axis) {
+      twist[axis] = config.quest_position_gain * action_[axis];
+      twist[3 + axis] = config.quest_rotation_gain * rotation_error_[axis];
+    }
+    const double linear = std::hypot(twist[0], twist[1], twist[2]);
+    const double angular = std::hypot(twist[3], twist[4], twist[5]);
+    for (size_t axis = 0; axis < 3; ++axis) {
+      if (linear > config.max_linear_speed_m_s) twist[axis] *= config.max_linear_speed_m_s / linear;
+      if (angular > config.max_angular_speed_rad_s) twist[3 + axis] *= config.max_angular_speed_rad_s / angular;
+    }
+    return twist;
+  }
+
+  [[nodiscard]] uint64_t take_gripper_action() override { return gripper_action_sequence_.exchange(0); }
+  [[nodiscard]] int gripper_action() const override { return gripper_action_.load(); }
+  [[nodiscard]] uint64_t gripper_command_count() const override { return gripper_command_count_.load(); }
+
+  void snapshot(telemetry::Sample& sample) const override {
+    sample.input_kind = 2;
+    telemetry::QuestSample& q = sample.quest;
+    q = {};
+    q.reading_valid = packet_.sequence != 0;
+    q.reading_sequence = packet_.sequence;
+    q.reading_age_s = age_s_;
+    q.reading_stamp_ns = packet_.receive_ns;
+    q.policy_active = has_target_;
+    q.movement_enabled = deadman_pressed();
+    q.action = action_;
+    q.target = {target_rotation_[0], target_rotation_[1], target_rotation_[2], target_position_[0],
+                target_rotation_[3], target_rotation_[4], target_rotation_[5], target_position_[1],
+                target_rotation_[6], target_rotation_[7], target_rotation_[8], target_position_[2],
+                0.0, 0.0, 0.0, 1.0};
+    sample.axis_count = 0;
+    sample.button_count = 0;
+  }
+
+ private:
+  const Config& config_;
+  policy_link::Receiver receiver_;
+  policy_link::Packet packet_;
+  uint64_t last_sequence_{0};
+  uint64_t sender_home_requests_{0};
+  uint64_t home_requests_{0};
+  bool fresh_{false};
+  bool has_target_{false};
+  double age_s_{0.0};
+  telemoma::Vec3 robot_position_{};
+  telemoma::Mat3 robot_rotation_{1, 0, 0, 0, 1, 0, 0, 0, 1};
+  telemoma::Vec3 target_position_{};
+  telemoma::Mat3 target_rotation_{1, 0, 0, 0, 1, 0, 0, 0, 1};
+  telemoma::Vec3 rotation_error_{};
+  std::array<double, 7> action_{0, 0, 0, 0, 0, 0, 1};
   std::atomic<int> gripper_action_{0};
   std::atomic<uint64_t> gripper_action_sequence_{0};
   std::atomic<uint64_t> gripper_command_count_{0};
@@ -725,11 +897,12 @@ class QuestTeleopInput final : public TeleopInput {
 }
 
 void print_usage(const char* name) {
-  std::cout << "Usage: " << name << " --config PATH [--input gamepad|quest] [--check-config | --enable-motion]\n"
+  std::cout << "Usage: " << name << " --config PATH [--input gamepad|quest|policy] [--check-config | --enable-motion]\n"
             << "\n"
             << "--check-config validates configuration only and never contacts hardware.\n"
             << "--enable-motion connects to the robot; the arm moves only while RB (gamepad) or the\n"
-            << "right grip (Meta Quest) is held. --input overrides the config's input setting.\n"
+            << "right grip (Meta Quest) is held, or (policy) while enabled actions arrive over UDP.\n"
+            << "--input overrides the config's input setting.\n"
             << "\n"
             << "While running it publishes ROS 2 topics for recording: /teleop/state (every\n"
             << "control tick), /teleop/joy and /teleop/session.\n";
@@ -815,6 +988,11 @@ constexpr double kMaximumJointSpeedRad_s = 1.0;
 // Null-space (elbow) motion fades in between 0 and this fraction of full stick,
 // so the elbow never moves by itself while the sticks are idle.
 constexpr double kNullspaceFullActivity = 0.1;
+// Home move: peak joint speed and acceleration of the quintic profile, and the
+// correction gain toward it (rad/s per rad).
+constexpr double kHomeSpeedRad_s = 0.3;
+constexpr double kHomeAccelerationRad_s2 = 0.5;
+constexpr double kHomeGain = 3.0;
 
 [[nodiscard]] diff_ik::Params ik_params(const Config& config) {
   diff_ik::Params params;  // Posture: Franka ready pose; see diff_ik.h for gains.
@@ -1092,8 +1270,10 @@ int main(int argc, char** argv) {
     }
     const Config config = loaded;
     std::cout << "configuration is valid; robot_ip=" << config.robot_ip << ", input=" << config.input
-              << (config.input == "quest" ? ", quest_connection=" + config.quest_connection
-                                          : ", joystick_path=" + config.joystick_path)
+              << (config.input == "quest"    ? ", quest_connection=" + config.quest_connection
+                  : config.input == "policy" ? ", policy=udp://" + config.policy_host + ":" +
+                                                   std::to_string(config.policy_port)
+                                             : ", joystick_path=" + config.joystick_path)
               << ", gripper_enabled=" << (config.gripper_enabled ? "true" : "false") << '\n';
     if (check_config) {
       return EXIT_SUCCESS;
@@ -1114,6 +1294,8 @@ int main(int argc, char** argv) {
     std::unique_ptr<TeleopInput> input;
     if (config.input == "quest") {
       input = std::make_unique<QuestTeleopInput>(config);
+    } else if (config.input == "policy") {
+      input = std::make_unique<PolicyTeleopInput>(config);
     } else {
       input = std::make_unique<JoystickInput>(config);
     }
@@ -1122,6 +1304,10 @@ int main(int argc, char** argv) {
       std::cout << "The arm moves only while the right controller's GRIP is held (TeleMoMa: the target is the\n"
                    "grip-press pose plus the controller's motion since); releasing it pauses. TRIGGER toggles\n"
                    "the gripper. B (grip released) re-sets \"forward\" to how you hold the controller now.\n"
+                   "Ctrl-C ends control.\n";
+    } else if (config.input == "policy") {
+      std::cout << "The arm follows the policy's actions while they arrive with 'enabled' set; it pauses\n"
+                   "when they stop for policy_timeout_ms. Keep the robot's stop button in reach.\n"
                    "Ctrl-C ends control.\n";
     } else {
       std::cout << "The arm moves only while RB (the right bumper) is held; releasing RB pauses (the\n"
@@ -1166,6 +1352,53 @@ int main(int argc, char** argv) {
       gripper_worker.emplace(run_gripper_worker, std::cref(config), std::ref(*input),
                              std::ref(stop_requested), std::ref(gripper_faulted),
                              std::ref(gripper_reading));
+    }
+    if (config.has_home) {
+      for (size_t joint = 0; joint < 7; ++joint) {
+        if (config.home_joints[joint] < kJointLowerRad[joint] + kJointLimitMarginRad ||
+            config.home_joints[joint] > kJointUpperRad[joint] - kJointLimitMarginRad) {
+          throw std::runtime_error("home_joints: joint " + std::to_string(joint + 1) + " is at or beyond its limit");
+        }
+      }
+    }
+    // Home move (stick flick): joint-space quintic to home_joints, at most
+    // kHomeSpeedRad_s per joint; the grip, another flick or Ctrl-C cancels it.
+    struct HomeMove {
+      bool active{false};
+      std::array<double, 7> from{};
+      double duration_s{0.0};
+      double elapsed_s{0.0};
+    } home;
+    uint64_t home_requests_seen = input->home_requests();
+    std::atomic<int> home_event{0};  // 1 started, 2 arrived, 3 cancelled, 4 no home saved
+    std::atomic<uint64_t> home_event_count{0};
+    std::atomic<double> home_duration_s{0.0};
+    auto announce = [&](int event) {
+      home_event.store(event);
+      home_event_count.fetch_add(1);
+    };
+    std::optional<std::jthread> announcer;  // the control loop must not print
+    if (config.input == "quest" || config.input == "policy") {
+      announcer.emplace([&home_event, &home_event_count, &home_duration_s,
+                        quest = config.input == "quest"](const std::stop_token& stop) {
+        uint64_t seen = 0;
+        while (!stop.stop_requested()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(100));
+          if (const uint64_t count = home_event_count.load(); count != seen) {
+            seen = count;
+            switch (home_event.load()) {
+              case 1: std::cout << "home: moving to the saved home pose (" << std::setprecision(2) << std::fixed
+                                << home_duration_s.load() << " s)"
+                                << (quest ? "; squeeze the grip or flick again to stop" : "") << '\n'; break;
+              case 2: std::cout << "home: arrived\n"; break;
+              case 3: std::cout << "home: stopped\n"; break;
+              case 4: std::cout << "home: no home pose saved; run tools/save_home_pose.sh\n"; break;
+              default: break;
+            }
+            std::cout << std::flush;
+          }
+        }
+      });
     }
     std::atomic<int> stop_reason{0};
     double control_elapsed_s = 0.0;
@@ -1280,6 +1513,51 @@ int main(int argc, char** argv) {
             }
             joint_velocity = dq;
             applied_fence_scale = scale;
+          }
+
+          // 3c. Home move (stick flick, grip released): replaces the teleop command.
+          if (const uint64_t requests = input->home_requests(); requests != home_requests_seen) {
+            home_requests_seen = requests;
+            if (home.active) {
+              home.active = false;
+              announce(3);
+            } else if (!config.has_home) {
+              announce(4);
+            } else if (!stopping) {
+              double largest = 0.0;
+              for (size_t joint = 0; joint < 7; ++joint) {
+                largest = std::max(largest, std::abs(config.home_joints[joint] - state.q[joint]));
+              }
+              home = {true, state.q,
+                      std::max({1.0, 1.875 * largest / kHomeSpeedRad_s, std::sqrt(5.7735 * largest / kHomeAccelerationRad_s2)}),
+                      0.0};
+              home_duration_s.store(home.duration_s);
+              announce(1);
+            }
+          }
+          if (home.active && (stopping || input->deadman_pressed())) {
+            home.active = false;
+            announce(3);
+          }
+          if (home.active) {
+            home.elapsed_s = std::min(home.elapsed_s + period.toSec(), home.duration_s);
+            const double tau = home.elapsed_s / home.duration_s;
+            const double s = tau * tau * tau * (10.0 - 15.0 * tau + 6.0 * tau * tau);
+            const double ds = 30.0 * tau * tau * (1.0 - tau) * (1.0 - tau) / home.duration_s;
+            double remaining = 0.0;
+            for (size_t joint = 0; joint < 7; ++joint) {
+              const double span = config.home_joints[joint] - home.from[joint];
+              const double desired = home.from[joint] + span * s;
+              joint_velocity[joint] = std::clamp(span * ds + kHomeGain * (desired - state.q[joint]),
+                                                 std::max(lower[joint], -2.0 * kHomeSpeedRad_s),
+                                                 std::min(upper[joint], 2.0 * kHomeSpeedRad_s));
+              remaining = std::max(remaining, std::abs(config.home_joints[joint] - state.q[joint]));
+            }
+            if (tau >= 1.0 && remaining < 1e-3) {
+              home.active = false;
+              joint_velocity = {};
+              announce(2);
+            }
           }
 
           // 4. Joint-space S-curve, then the hard safety clip with the robot's

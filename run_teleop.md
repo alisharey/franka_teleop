@@ -36,17 +36,25 @@ Then:
 | **Trigger** (index finger) | Toggles the gripper: pull once = close, pull again = open. Works while the grip is held (TeleMoMa); a pull with the grip released takes effect at the next grip press. |
 | **Stick click** or **B** (grip released) | Re-sets "forward" to where the controller points now. |
 | **A** | Start / stop a recording. |
+| **Stick flicked down** (grip released) | The arm moves to the saved home pose (joint space, at most 0.3 rad/s per joint). Squeezing the grip, flicking again or Ctrl-C stops it. |
 
 Ctrl-C in the terminal ends the teleop; you can then restart it (Enter) or quit
 (q). The web page with the cameras and episodes is at http://localhost:8765.
 
 ## Settings (`config/teleop.conf`)
 
+- `home_joints`: the home pose for the stick flick. To change it, move the arm
+  to the new pose, close the teleop, and run `tools/save_home_pose.sh` (reads the
+  joints, no motion).
+
 - `quest_connection = 10.42.0.175` uses Wi-Fi; `quest_connection = usb` uses the cable.
 - `quest_axis_reorder = 3, 1, 2, 4` (default) is for standing in front of the
   robot, facing it; behind it, facing its front: `-3, -1, 2, 4`.
 - `quest_timeout_ms = 500`: readings older than this pause the arm (Wi-Fi has
   brief gaps).
+- `quest_rotation_scale = 1.5`: the gripper turns 1.5x as far as your hand
+  (1 = exactly like your hand, as in TeleMoMa). The recorded TeleMoMa action
+  uses the scaled rotation.
 
 ## Connection modes
 
@@ -114,6 +122,8 @@ cable in, `tools/quest/quest_wifi.sh`, cable out.
   `python3 tools/quest/quest_monitor.py --connection 10.42.0.175`
 - "User stopped" error: the robot's stop button is pressed; release it.
 - Trigger does nothing: the gripper is not homed (`tools/home_gripper.sh`).
+- "the Quest (...) is unauthorized": put the headset on and accept "Allow
+  debugging" (tick "Always allow"). It can ask again over Wi-Fi.
 - No readings / "Wi-Fi ADB" errors after a headset restart: cable in, run
   `tools/quest/quest_wifi.sh`, accept the debugging prompt in the headset.
 - The reader app on the headset ("Xr Controllers", fixed fork, see

@@ -25,6 +25,10 @@
 // level_frame the reset keeps only the controller's heading and takes "up" from
 // the headset frame (headset upright and level). The action math is unchanged.
 //
+// Optional (rotation_scale): the controller's rotation since the grip press is
+// scaled before it becomes the target offset (1 = TeleMoMa; 1.5 = the gripper
+// turns 1.5x as far as the hand). Positions are unaffected.
+//
 // One deliberate difference: TeleMoMa keeps re-evaluating a pending gripper
 // toggle on every action call until the next controller reading. At its 10 Hz
 // that is harmless; called at 1 kHz it would flip the gripper back and forth, so
@@ -118,6 +122,17 @@ inline Mat3 from_euler_xyz(const Vec3& e) {
           -sb,     cb * sa,                cb * ca};
 }
 
+// Rotation matrix of a rotation vector (Rodrigues).
+inline Mat3 rotation_exp(const Vec3& w) {
+  const double angle = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]);
+  if (angle < 1e-12) return {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  const double x = w[0] / angle, y = w[1] / angle, z = w[2] / angle;
+  const double s = std::sin(angle), c = std::cos(angle), t = 1.0 - c;
+  return {c + x * x * t, x * y * t - z * s, x * z * t + y * s,
+          y * x * t + z * s, c + y * y * t, y * z * t - x * s,
+          z * x * t - y * s, z * y * t + x * s, c + z * z * t};
+}
+
 // Rotation vector of a rotation matrix (for the tracking controller).
 inline Vec3 rotation_vector(const Mat3& r) {
   const double cosine = std::clamp((r[0] + r[4] + r[8] - 1.0) / 2.0, -1.0, 1.0);
@@ -136,8 +151,11 @@ struct ControllerButtons {
 class OculusPolicy {
  public:
   explicit OculusPolicy(const std::array<int, 4>& rmat_reorder = {-2, -1, -3, 4}, double spatial_coeff = 1.0,
-                        bool level_frame = false)
-      : global_to_env_(reorder_matrix(rmat_reorder)), spatial_coeff_(spatial_coeff), level_frame_(level_frame) {}
+                        bool level_frame = false, double rotation_scale = 1.0)
+      : global_to_env_(reorder_matrix(rmat_reorder)),
+        spatial_coeff_(spatial_coeff),
+        level_frame_(level_frame),
+        rotation_scale_(rotation_scale) {}
 
   // One controller reading (the right controller is in `poses`).
   void on_reading(const Mat4& pose, const ControllerButtons& buttons) {
@@ -185,7 +203,12 @@ class OculusPolicy {
       action[i] = (vr_pos_[i] - vr_origin_pos_[i]) - (robot_pos[i] - robot_origin_pos_[i]);
     }
     const Mat3 robot_offset = multiply(robot_rot, transpose(robot_origin_rot_));
-    const Mat3 target_offset = multiply(vr_rot_, transpose(vr_origin_rot_));
+    Mat3 target_offset = multiply(vr_rot_, transpose(vr_origin_rot_));
+    if (rotation_scale_ != 1.0) {
+      Vec3 w = rotation_vector(target_offset);
+      for (double& value : w) value *= rotation_scale_;
+      target_offset = rotation_exp(w);
+    }
     const Vec3 euler = euler_xyz(multiply(target_offset, transpose(robot_offset)));
     action[3] = euler[0];
     action[4] = euler[1];
@@ -193,10 +216,20 @@ class OculusPolicy {
     if (vr_gripper_toggle_) {
       target_gripper_ = 1 - (gripper_position > 0.5 ? 1 : 0);
       vr_gripper_toggle_ = false;  // applied once (see the header comment)
+      gripper_toggled_ = true;
     }
     action[6] = target_gripper_;
     for (double& value : action) value = std::clamp(value, -1.0, 1.0);
     return action;
+  }
+
+  // True once after each applied trigger toggle (consumed). The target can equal
+  // the previous one (e.g. the gripper was already closed at start), so a
+  // command must follow every toggle, not only a change of the target.
+  bool take_gripper_toggled() {
+    const bool toggled = gripper_toggled_;
+    gripper_toggled_ = false;
+    return toggled;
   }
 
   bool has_pose() const { return has_pose_; }
@@ -244,6 +277,7 @@ class OculusPolicy {
   Mat4 global_to_env_;
   double spatial_coeff_;
   bool level_frame_;
+  double rotation_scale_;
   Mat4 vr_to_global_ = identity4();
   Mat4 pose_ = identity4();
   bool has_pose_ = false;
@@ -257,6 +291,7 @@ class OculusPolicy {
   Vec3 vr_pos_{};
   Mat3 vr_rot_{1, 0, 0, 0, 1, 0, 0, 0, 1};
   bool vr_gripper_toggle_ = false;
+  bool gripper_toggled_ = false;
   Vec3 vr_origin_pos_{};
   Mat3 vr_origin_rot_{1, 0, 0, 0, 1, 0, 0, 0, 1};
   Vec3 robot_origin_pos_{};

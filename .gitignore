@@ -4,3 +4,5 @@ log/
 *.o
 __pycache__/
 third_party/
+vla/baku/.venv/
+vla/baku/runs/

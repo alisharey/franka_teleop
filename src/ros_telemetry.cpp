@@ -4,7 +4,8 @@
 //   /teleop/state    franka_teleop/TeleopState, every control tick (1 kHz)
 //   /teleop/joy      sensor_msgs/Joy, normalized gamepad, 100 Hz and on every button change
 //   /teleop/session  std_msgs/String (latched JSON): config path and text, git commit
-//   /teleop/quest    franka_teleop/QuestState, every control tick, with input = quest
+//   /teleop/quest    franka_teleop/QuestState, every control tick, with input = quest or policy
+//                    (policy: action/target/movement_enabled only; /teleop/joy frame_id "policy")
 
 #include "telemetry.h"
 
@@ -205,7 +206,7 @@ class RosPublisher final : public Publisher {
     if (buttons_changed || sample.stamp_ns - last_joy_ns_ >= kJoyPeriodNs) {
       sensor_msgs::msg::Joy joy;
       joy.header = m.header;
-      joy.header.frame_id = sample.input_kind == 1 ? "quest" : "gamepad";
+      joy.header.frame_id = sample.input_kind == 1 ? "quest" : sample.input_kind == 2 ? "policy" : "gamepad";
       joy.axes.reserve(sample.axis_count);
       for (size_t axis = 0; axis < sample.axis_count; ++axis) {
         joy.axes.push_back(static_cast<float>(sample.axes[axis]) / 32767.0F);
@@ -215,7 +216,7 @@ class RosPublisher final : public Publisher {
       last_joy_ns_ = sample.stamp_ns;
       last_joy_buttons_ = m.buttons;
     }
-    if (sample.input_kind == 1) {
+    if (sample.input_kind == 1 || sample.input_kind == 2) {  // 2 = policy: same action/target fields
       publish_quest(sample);
     }
   }
