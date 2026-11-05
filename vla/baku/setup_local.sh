@@ -14,7 +14,7 @@ PIP="$HERE/.venv/bin/pip"
 "$PIP" install --upgrade pip
 "$PIP" install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
 "$PIP" install "numpy<2" hydra-core==1.1.0 omegaconf==2.1.2 einops==0.7.0 diffusers==0.11.1 \
-  huggingface-hub==0.33.0 tqdm scipy==1.13.1 matplotlib
+  huggingface-hub==0.25.2 tqdm scipy==1.13.1 matplotlib
 "$PIP" install --no-deps robomimic==0.2.0   # BAKU only uses robomimic.utils.tensor_utils
 set +u
 source /opt/ros/humble/setup.bash

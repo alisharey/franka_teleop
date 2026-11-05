@@ -5,7 +5,8 @@
 //   char     magic[4]        "FPA1"
 //   uint32   flags           bit 0: enabled (apply the action; 0 = hold still)
 //   uint64   sequence        increments per policy step
-//   uint64   home_requests   increments to request the saved home pose
+//   uint64   home_requests   upper 32 bits: sender session (random per sender start);
+//                            lower 32 bits: count, +1 per request for the saved home pose
 //   double   action[7]       TeleMoMa action [dx dy dz droll dpitch dyaw gripper]:
 //                            base frame, target - current position [m], scipy "xyz"
 //                            Euler of R_target R_current^T [rad], gripper 1 = open

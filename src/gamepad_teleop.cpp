@@ -762,11 +762,17 @@ class PolicyTeleopInput final : public TeleopInput {
     fresh_ = packet_.sequence != 0 && age_s_ * 1000.0 <= config_.policy_timeout_ms;
     if (packet_.sequence != last_sequence_) {
       last_sequence_ = packet_.sequence;
-      // Home requests count up per sender; a restarted sender (lower count) re-syncs silently.
-      if (packet_.home_requests > sender_home_requests_) {
-        home_requests_ += packet_.home_requests - sender_home_requests_;
+      // home_requests = sender session (upper 32 bits, new per sender start) and a count of
+      // requests (lower 32 bits). A new session only syncs, so a restarted sender never
+      // triggers a home move by itself; within a session every increment is a request.
+      const uint64_t session = packet_.home_requests >> 32U;
+      const uint64_t count = packet_.home_requests & 0xFFFFFFFFULL;
+      if (have_sender_ && session == sender_session_ && count > sender_count_) {
+        home_requests_ += count - sender_count_;
       }
-      sender_home_requests_ = packet_.home_requests;
+      have_sender_ = true;
+      sender_session_ = session;
+      sender_count_ = count;
       const auto& a = packet_.action;
       for (size_t axis = 0; axis < 3; ++axis) target_position_[axis] = robot_position_[axis] + a[axis];
       target_rotation_ = telemoma::multiply(telemoma::from_euler_xyz({a[3], a[4], a[5]}), robot_rotation_);
@@ -850,7 +856,9 @@ class PolicyTeleopInput final : public TeleopInput {
   policy_link::Receiver receiver_;
   policy_link::Packet packet_;
   uint64_t last_sequence_{0};
-  uint64_t sender_home_requests_{0};
+  bool have_sender_{false};
+  uint64_t sender_session_{0};
+  uint64_t sender_count_{0};
   uint64_t home_requests_{0};
   bool fresh_{false};
   bool has_target_{false};
@@ -990,8 +998,9 @@ constexpr double kMaximumJointSpeedRad_s = 1.0;
 constexpr double kNullspaceFullActivity = 0.1;
 // Home move: peak joint speed and acceleration of the quintic profile, and the
 // correction gain toward it (rad/s per rad).
-constexpr double kHomeSpeedRad_s = 0.3;
-constexpr double kHomeAccelerationRad_s2 = 0.5;
+// (FR3: 2.62-5.26 rad/s and 10 rad/s^2; these are about 25% and 10% of that.)
+constexpr double kHomeSpeedRad_s = 0.6;
+constexpr double kHomeAccelerationRad_s2 = 1.0;
 constexpr double kHomeGain = 3.0;
 
 [[nodiscard]] diff_ik::Params ik_params(const Config& config) {

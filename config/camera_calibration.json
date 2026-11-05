@@ -1,0 +1,289 @@
+{
+ "session": "/home/airocs/franka_calibration/20261024_152155",
+ "tag_id": 4,
+ "snapshots_used": 17,
+ "hand_eye_method": "park",
+ "frames": {
+  "base": "robot base (libfranka O)",
+  "ee": "libfranka EE frame (O_T_EE)",
+  "camera": "optical: x right, y down, z forward"
+ },
+ "T_ee_cam_cam_1": [
+  [
+   0.20163903700817398,
+   -0.7367170170569426,
+   -0.645437631017229,
+   0.11877794796554614
+  ],
+  [
+   0.9793925570699935,
+   0.14392832920069498,
+   0.14168576219782736,
+   -0.034318293866917614
+  ],
+  [
+   -0.01148555225032677,
+   -0.660706192518461,
+   0.7505567328705309,
+   -0.10108868505395552
+  ],
+  [
+   0.0,
+   0.0,
+   0.0,
+   1.0
+  ]
+ ],
+ "T_base_tag": [
+  [
+   -0.9961944638473785,
+   -0.07864001819060382,
+   -0.03758108219324386,
+   0.6628577661195022
+  ],
+  [
+   -0.08002361480063286,
+   0.9961116047286912,
+   0.03684958614519639,
+   -0.2903881349723777
+  ],
+  [
+   0.034537099966178576,
+   0.03971672775813476,
+   -0.9986139245284498,
+   0.009254228554325483
+  ],
+  [
+   0.0,
+   0.0,
+   0.0,
+   1.0
+  ]
+ ],
+ "intrinsics": {
+  "cam_1": {
+   "K": [
+    [
+     614.8515625,
+     0.0,
+     322.1319885253906
+    ],
+    [
+     0.0,
+     615.16162109375,
+     243.16213989257812
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "width": 640,
+   "height": 480,
+   "distortion": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "depth_scale": 0.0010000000474974513
+  },
+  "cam_2": {
+   "K": [
+    [
+     606.27197265625,
+     0.0,
+     324.6954040527344
+    ],
+    [
+     0.0,
+     606.0158081054688,
+     245.3185272216797
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "width": 640,
+   "height": 480,
+   "distortion": [
+    0,
+    0,
+    0,
+    0,
+    0
+   ],
+   "depth_scale": 0.0010000000474974513
+  }
+ },
+ "stats": {
+  "hand_eye_methods_vs_chosen_mm_deg": {
+   "park": [
+    0.0,
+    0.0
+   ],
+   "tsai": [
+    7.72,
+    3.098
+   ],
+   "daniilidis": [
+    45.22,
+    0.99
+   ],
+   "horaud": [
+    0.25,
+    0.149
+   ]
+  },
+  "tag_spread_mm_median": 5.858014255762161,
+  "tag_spread_mm_max": 11.993705787240263,
+  "tag_spread_deg_median": 2.021229308019706,
+  "tag_spread_deg_max": 5.958780006408724,
+  "wrist_reprojection_px_median": 3.1154431965889473,
+  "orientation_span_deg": 134.3,
+  "static_snapshots": 17,
+  "static_tag_distance_m": 1.224285117877338,
+  "static_tag_spread_mm_median": 0.7627054396154599,
+  "static_tag_spread_deg_median": 0.09141941694827212
+ },
+ "per_snapshot": [
+  {
+   "index": 1,
+   "tag_offset_mm": 12.0,
+   "tag_offset_deg": 1.66,
+   "reprojection_px": 6.06
+  },
+  {
+   "index": 2,
+   "tag_offset_mm": 7.1,
+   "tag_offset_deg": 1.68,
+   "reprojection_px": 6.03
+  },
+  {
+   "index": 3,
+   "tag_offset_mm": 6.1,
+   "tag_offset_deg": 2.4,
+   "reprojection_px": 2.37
+  },
+  {
+   "index": 4,
+   "tag_offset_mm": 2.8,
+   "tag_offset_deg": 2.29,
+   "reprojection_px": 1.87
+  },
+  {
+   "index": 5,
+   "tag_offset_mm": 8.0,
+   "tag_offset_deg": 1.74,
+   "reprojection_px": 6.28
+  },
+  {
+   "index": 6,
+   "tag_offset_mm": 10.8,
+   "tag_offset_deg": 2.12,
+   "reprojection_px": 6.96
+  },
+  {
+   "index": 7,
+   "tag_offset_mm": 4.0,
+   "tag_offset_deg": 3.13,
+   "reprojection_px": 2.47
+  },
+  {
+   "index": 8,
+   "tag_offset_mm": 8.6,
+   "tag_offset_deg": 5.96,
+   "reprojection_px": 3.12
+  },
+  {
+   "index": 9,
+   "tag_offset_mm": 5.9,
+   "tag_offset_deg": 0.68,
+   "reprojection_px": 4.22
+  },
+  {
+   "index": 10,
+   "tag_offset_mm": 4.8,
+   "tag_offset_deg": 2.23,
+   "reprojection_px": 3.14
+  },
+  {
+   "index": 11,
+   "tag_offset_mm": 5.1,
+   "tag_offset_deg": 2.02,
+   "reprojection_px": 1.33
+  },
+  {
+   "index": 12,
+   "tag_offset_mm": 8.9,
+   "tag_offset_deg": 1.47,
+   "reprojection_px": 4.17
+  },
+  {
+   "index": 13,
+   "tag_offset_mm": 2.2,
+   "tag_offset_deg": 1.06,
+   "reprojection_px": 1.85
+  },
+  {
+   "index": 14,
+   "tag_offset_mm": 10.0,
+   "tag_offset_deg": 3.22,
+   "reprojection_px": 4.89
+  },
+  {
+   "index": 15,
+   "tag_offset_mm": 3.8,
+   "tag_offset_deg": 3.65,
+   "reprojection_px": 1.72
+  },
+  {
+   "index": 16,
+   "tag_offset_mm": 2.7,
+   "tag_offset_deg": 1.61,
+   "reprojection_px": 1.96
+  },
+  {
+   "index": 17,
+   "tag_offset_mm": 2.3,
+   "tag_offset_deg": 1.66,
+   "reprojection_px": 2.14
+  }
+ ],
+ "T_base_cam_cam_2": [
+  [
+   -0.05208637681623266,
+   0.14867502741043515,
+   -0.9875134153897166,
+   1.7610302711496995
+  ],
+  [
+   0.9969900874027733,
+   -0.04912183115255629,
+   -0.05998175826724382,
+   0.03642590004929469
+  ],
+  [
+   -0.05742625680616677,
+   -0.9876653187840132,
+   -0.1456689503652242,
+   0.4406285272375928
+  ],
+  [
+   0.0,
+   0.0,
+   0.0,
+   1.0
+  ]
+ ],
+ "check_images": [
+  "check_cam_2_0.png",
+  "check_cam_2_1.png",
+  "check_cam_2_2.png",
+  "check_cam_2_3.png"
+ ]
+}

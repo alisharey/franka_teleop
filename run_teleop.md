@@ -36,7 +36,7 @@ Then:
 | **Trigger** (index finger) | Toggles the gripper: pull once = close, pull again = open. Works while the grip is held (TeleMoMa); a pull with the grip released takes effect at the next grip press. |
 | **Stick click** or **B** (grip released) | Re-sets "forward" to where the controller points now. |
 | **A** | Start / stop a recording. |
-| **Stick flicked down** (grip released) | The arm moves to the saved home pose (joint space, at most 0.3 rad/s per joint). Squeezing the grip, flicking again or Ctrl-C stops it. |
+| **Stick flicked down** (grip released) | The arm moves to the saved home pose (joint space, at most 0.6 rad/s per joint). Squeezing the grip, flicking again or Ctrl-C stops it. |
 
 Ctrl-C in the terminal ends the teleop; you can then restart it (Enter) or quit
 (q). The web page with the cameras and episodes is at http://localhost:8765.
@@ -115,6 +115,33 @@ Once per headset:
 
 Every session: wake the right controller. After a headset restart (Wi-Fi mode):
 cable in, `tools/quest/quest_wifi.sh`, cable out.
+
+## Camera calibration (camera poses for point clouds / sim)
+
+Gives the third-person camera's pose in the robot base frame and the wrist
+camera's pose on the gripper, from one recording and the AprilTag on the table
+(tagStandard41h12, id 4, 55.6 mm black square). Leave the tag where it is while
+recording; the cameras must not move afterwards (the tag may).
+
+1. `./record.sh --quest`, press A to record.
+2. Move the arm to 15-25 poses where the **wrist camera** sees the tag, and
+   **stop about 1 s at each**. Between stops, tilt the gripper 20-40 deg about
+   different axes (not just sliding it around); keep the tag 20-50 cm from the
+   wrist camera. The third-person camera should see the tag too.
+3. Stop the recording, then:
+   ```bash
+   tools/calibration/calibrate.sh ~/franka_teleop_data/<episode>
+   ```
+   It prints the residuals (tag spread in mm/deg, reprojection in px), writes
+   `<episode>/calibration/` (calibration.json + check images with the robot's base
+   and end-effector axes drawn into the third-person view) and copies the result to
+   `config/camera_calibration.json`.
+
+## Running a trained policy
+
+`./record.sh --deploy`, then the **Policy** panel on http://localhost:8765:
+load a checkpoint, Preview (no motion), Go home, Run episode, Stop, label it.
+Details, and what each rollout records: `vla/baku/README.md`.
 
 ## Checks and troubleshooting
 

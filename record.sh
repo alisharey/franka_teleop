@@ -10,7 +10,7 @@
 #   ./record.sh --no-browser    # don't open the web UI
 #   ./record.sh --no-teleop     # cameras + recorder only
 #   ./record.sh --quest         # Meta Quest right controller instead of the gamepad
-#   ./record.sh --policy        # a trained policy drives the arm (run vla/baku/deploy.sh too)
+#   ./record.sh --deploy        # a trained BAKU policy drives the arm (Policy panel on the web page)
 set -uo pipefail
 
 cd "$(dirname "$(readlink -f "$0")")"
@@ -24,7 +24,7 @@ for argument in "$@"; do
     --no-browser) OPEN_BROWSER=0 ;;
     --no-teleop) RUN_TELEOP=0 ;;
     --quest) INPUT=quest ;;
-    --policy) INPUT=policy ;;
+    --deploy) INPUT=policy ;;
     -h|--help) sed -n '2,13p' "$0" | cut -c3-; exit 0 ;;
     *) echo "unknown option: $argument (see --help)"; exit 2 ;;
   esac
@@ -59,6 +59,13 @@ LAUNCH_PID=$!
 
 stop_recording_stack() {
   trap - EXIT INT TERM
+  if [[ -n "${POLICY_PID:-}" ]] && kill -0 "$POLICY_PID" 2> /dev/null; then
+    echo "Stopping the policy server..."
+    kill -INT "$POLICY_PID" 2> /dev/null
+    for _ in $(seq 1 50); do kill -0 "$POLICY_PID" 2> /dev/null || break; sleep 0.2; done
+    kill -TERM "$POLICY_PID" 2> /dev/null  # still running after 10 s
+    wait "$POLICY_PID" 2> /dev/null
+  fi
   if kill -0 "$LAUNCH_PID" 2> /dev/null; then
     echo "Stopping cameras and recorder (a running episode is saved first)..."
     kill -INT -- "-$LAUNCH_PID" 2> /dev/null
@@ -66,6 +73,18 @@ stop_recording_stack() {
   fi
   echo "Done. Log: $LOG"
 }
+POLICY_PID=""
+if [[ $INPUT == policy ]]; then
+  if [[ ! -x vla/baku/.venv/bin/python || ! -f vla/BAKU/baku/franka/policy.py ]]; then
+    echo "Policy deployment is not set up: run vla/baku/setup_local.sh first."
+    kill -INT -- "-$LAUNCH_PID" 2> /dev/null
+    exit 1
+  fi
+  POLICY_LOG="log/policy_$(date +%Y%m%d_%H%M%S).log"
+  setsid vla/baku/.venv/bin/python vla/baku/deploy.py --record "$URL" > "$POLICY_LOG" 2>&1 &
+  POLICY_PID=$!
+  echo "Policy server started (log: $POLICY_LOG)."
+fi
 trap stop_recording_stack EXIT
 trap 'exit 130' TERM
 
@@ -105,8 +124,8 @@ TELEOP=install/franka_teleop/lib/franka_teleop/gamepad_teleop
 while true; do
   echo
   if [[ $INPUT == policy ]]; then
-    echo "Starting the teleop for a policy: in a second terminal run vla/baku/deploy.sh <snapshot> --record $URL"
-    echo "(Enter there starts/stops a rollout). Ctrl-C here ends the teleop. Keep the stop button in reach."
+    echo "Starting the teleop for the policy. Use the Policy panel on $URL: load a checkpoint, Go home,"
+    echo "Preview (no motion), Run episode, Stop. Ctrl-C here ends the teleop. Keep the stop button in reach."
   elif [[ $INPUT == quest ]]; then
     echo "Starting the teleop with the Meta Quest: hold the right GRIP to move, TRIGGER toggles the gripper,"
     echo "A starts/stops a recording; Ctrl-C ends the teleop."

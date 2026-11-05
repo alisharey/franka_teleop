@@ -29,3 +29,18 @@ g++ -std=c++20 -O2 $INC -c tests/sim/null_telemetry.cpp -o /tmp/simbuild/null_te
 g++ /tmp/simbuild/*.o -o /tmp/sim_teleop -Wl,--wrap=ioctl -lpthread
 tests/sim/run_sim_session.sh /tmp/sim_teleop /tmp/simrun   # about 30 s, real time
 ```
+
+## Policy server dry run (no robot, no cameras)
+
+`fake_cameras.py` replays a recorded episode as the camera topics (`--depth`:
+also the aligned depth; `--state`: also `/teleop/state` from the episode bag).
+In a separate ROS domain so
+nothing reaches a running robot stack:
+
+```bash
+source /opt/ros/humble/setup.bash && source install/setup.bash && export ROS_DOMAIN_ID=77
+python3 tests/sim/fake_cameras.py ~/franka_teleop_data/<episode> --depth --state &
+vla/baku/deploy.sh --no-motion --record "" --http-port 8799
+curl -XPOST localhost:8799/api/policy/load -d '{"checkpoint": "'$PWD'/vla/baku/runs/<run>/snapshot/<step>.pt"}'
+curl -XPOST localhost:8799/api/policy/preview -d '{"on": true}'; curl localhost:8799/api/policy/status
+```

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Runs a trained BAKU snapshot on the robot (see deploy.py --help).
-# Start ./record.sh --policy in another terminal first (cameras, recorder, teleop).
-#   vla/baku/deploy.sh vla/baku/runs/<run>/snapshot/60000.pt --record http://localhost:8765
+# Runs the policy server alone (normally ./record.sh --deploy starts it), e.g.
+#   vla/baku/deploy.sh --no-motion      # preview only: never sends actions or home requests
+# See deploy.py --help.
 set -eo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"

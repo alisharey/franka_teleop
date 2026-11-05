@@ -16,6 +16,7 @@
     }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
@@ -80,6 +81,18 @@
   dialog .dhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 10px; }
   .files { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; font-size: 12.5px; }
   .files a { color: var(--accent); }
+  .prow { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; margin-bottom: 10px; }
+  .prow label { min-width: 0; }
+  select { padding: 6px 8px; border-radius: 7px; border: 1px solid var(--line); background: var(--bg);
+           color: var(--text); font: inherit; max-width: 100%; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.stop { background: var(--rec); border-color: var(--rec); color: #fff; font-weight: 650; }
+  .check { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; color: var(--text); }
+  .pgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px; }
+  .stat { background: var(--chip); border-radius: 8px; padding: 7px 10px; }
+  .stat .k { font-size: 11.5px; color: var(--muted); }
+  .stat .v { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .labelbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
   @media (max-width: 720px) {
     .recbar { grid-template-columns: 1fr; }
     .fields { grid-template-columns: 1fr; }
@@ -108,6 +121,37 @@
           <input type="text" id="nextname" placeholder="auto: episode_0001"></label>
       </div>
     </div>
+  </section>
+
+  <section class="panel" id="policy" hidden>
+    <h2>Policy <span class="chip" id="p-state">–</span> <span class="chip" id="p-home">Home <b>–</b></span>
+      <span class="chip" id="p-gpu">GPU <b>–</b></span></h2>
+    <div class="prow">
+      <label>Checkpoint <select id="p-ckpt"></select></label>
+      <button class="btn" id="p-load">Load</button>
+      <label>Task <select id="p-task"></select></label>
+      <span class="status" id="p-loaded"></span>
+    </div>
+    <div class="prow">
+      <button class="btn" id="p-homebtn">Go home</button>
+      <button class="btn" id="p-preview" title="Runs the policy on the live cameras and shows its actions. Nothing is sent to the robot.">Preview (no motion)</button>
+      <button class="btn primary" id="p-start">Run episode</button>
+      <label class="check"><input type="checkbox" id="p-homefirst" checked> home first</label>
+      <label class="check"><input type="checkbox" id="p-record" checked> record episode</label>
+      <button class="btn stop" id="p-stop">Stop</button>
+    </div>
+    <div class="labelbar" id="p-labelbar" hidden>
+      <span><b>Last episode</b> <span class="status" id="p-lastrun"></span></span>
+      <span class="seg" id="p-labels">
+        <button class="s" data-outcome="success" onclick="policyLabel('success')">Success</button>
+        <button class="f" data-outcome="failure" onclick="policyLabel('failure')">Failure</button>
+        <button class="f" data-outcome="intervention" onclick="policyLabel('intervention')">Failure, I intervened</button>
+        <button class="f" data-outcome="discard" onclick="policyLabel('discard')">Discard</button>
+      </span>
+      <span class="status">optional; sets the recording's label too</span>
+    </div>
+    <div class="pgrid" id="p-live"></div>
+    <div class="status" id="p-msg" style="margin-top:8px"></div>
   </section>
 
   <section class="cams" id="cams"></section>
@@ -295,6 +339,91 @@ function pushSettings() {
 }
 $('task').addEventListener('input', pushSettings);
 $('nextname').addEventListener('input', pushSettings);
+
+// ---- Policy panel: talks to vla/baku/deploy.py (record.sh --deploy), shown only while it runs.
+const POLICY = `${location.protocol}//${location.hostname}:8766`;
+let policy = null, policyCkptsKey = '', policyTasksKey = '';
+async function papi(path, body) {
+  const options = body === undefined ? {} :
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
+  const response = await fetch(POLICY + path, options);
+  const data = await response.json();
+  if (!response.ok || data.ok === false) throw new Error(data.error || response.statusText);
+  return data;
+}
+async function policyCmd(path, body) { try { await papi(path, body || {}); } catch (e) { toast(e.message); } }
+function policyLabel(outcome) { policyCmd('/api/policy/label', { outcome }); }
+function fmt(v, scale, digits) { return v === null || v === undefined ? '–' : (v * scale).toFixed(digits); }
+function renderPolicy(p) {
+  policy = p;
+  $('policy').hidden = false;
+  const busy = !['idle', 'preview'].includes(p.state);
+  const names = { idle: 'ready', loading: 'loading', homing: 'going home', preview: 'preview (no motion)',
+                  running: 'RUNNING' };
+  chip('p-state', `<b>${esc(names[p.state] || p.state)}</b>`, p.state === 'running' ? 'bad' : p.state === 'preview' ? 'warn' : 'good');
+  const r = p.robot || {};
+  chip('p-home', !r.connected ? 'Robot <b>no teleop</b>' : r.at_home ? 'Home <b>at home</b>' :
+       `Home <b>${r.home_error_rad != null ? (r.home_error_rad * 57.3).toFixed(1) + '° away' : 'not saved'}</b>`,
+       !r.connected ? 'warn' : r.at_home ? 'good' : '');
+  chip('p-gpu', `GPU <b>${p.gpu_free_mb != null ? (p.gpu_free_mb / 1024).toFixed(1) + ' GB free' : '–'}</b>`,
+       p.gpu_free_mb != null && p.gpu_free_mb < 1500 ? 'bad' : '');
+  const key = p.checkpoints.map((c) => c.path).join('|');
+  if (key !== policyCkptsKey) {
+    policyCkptsKey = key;
+    $('p-ckpt').innerHTML = p.checkpoints.map((c) => `<option value="${esc(c.path)}">${esc(c.label)}</option>`).join('');
+    if (p.loaded) $('p-ckpt').value = p.loaded.path;
+  }
+  const tkey = p.tasks.join('|');
+  if (tkey !== policyTasksKey) {
+    policyTasksKey = tkey;
+    $('p-task').innerHTML = p.tasks.map((t, i) => `<option value="${i}">${esc(t)}</option>`).join('');
+  }
+  if (p.task_index != null) $('p-task').value = String(p.task_index);
+  $('p-loaded').textContent = p.loaded ? `Loaded: ${p.loaded.label}` : 'No checkpoint loaded';
+  $('p-load').disabled = p.state !== 'idle';
+  $('p-task').disabled = p.state !== 'idle';
+  $('p-homebtn').disabled = p.state !== 'idle' || p.no_motion || !p.home_saved;
+  $('p-preview').disabled = !p.loaded || !(p.state === 'idle' || p.state === 'preview');
+  $('p-preview').textContent = p.state === 'preview' ? 'Stop preview' : 'Preview (no motion)';
+  $('p-start').disabled = !p.loaded || p.state !== 'idle' || p.no_motion;
+  $('p-record').disabled = !p.recorder;
+  $('p-stop').disabled = !['running', 'homing', 'preview'].includes(p.state);
+  const run = p.last_run;
+  $('p-labelbar').hidden = !run || p.state === 'running';
+  if (run) {
+    $('p-lastrun').textContent = `${run.id} · ${run.steps} steps · ended: ${run.reason}` +
+      (run.record_episode ? ' · recorded' : '') + (run.outcome ? '' : ' · not labelled');
+    for (const b of $('p-labels').children) b.classList.toggle('on', b.dataset.outcome === run.outcome);
+  }
+  const l = p.last || {}, a = l.action || [];
+  const age = (v) => v == null ? 'none' : v.toFixed(2) + ' s';
+  const cams = Object.entries(p.cameras || {}).map(([c, v]) => `${c} ${age(v)}`).join(' · ');
+  const stats = [
+    ['Step', p.loaded ? `${p.step} / ${p.max_steps} @ ${p.rate_hz} Hz` : '–'],
+    ['Move dx dy dz [mm]', a.length ? [0, 1, 2].map((i) => fmt(a[i], 1000, 1)).join('  ') : '–'],
+    ['Turn droll dpitch dyaw [°]', a.length ? [3, 4, 5].map((i) => fmt(a[i], 57.2958, 1)).join('  ') : '–'],
+    ['Gripper', a.length ? (a[6] >= 0.5 ? 'open' : 'close') + ` (${a[6].toFixed(2)})` : '–'],
+    ['Next 1 s, summed [mm]', l.chunk_xyz_mm ? l.chunk_xyz_mm.map((v) => v.toFixed(0)).join('  ') : '–'],
+    ['VQ-BeT entropy · codes', l.entropy != null ? `${l.entropy.toFixed(2)} · ${(l.codes || []).join(', ')}` : '–'],
+    ['Inference', l.compute_ms != null ? `${l.compute_ms} ms` : '–'],
+    ['Cameras (frame age)', cams || '–'],
+  ];
+  $('p-live').innerHTML = stats.map(([k, v]) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
+  $('p-msg').className = 'status' + (p.error ? ' warn' : '');
+  $('p-msg').textContent = (p.no_motion ? 'NO-MOTION mode: preview only. ' : '') + (p.error ? 'Error: ' + p.error + ' · ' : '') + (p.message || '');
+}
+async function pollPolicy() {
+  try { renderPolicy(await papi('/api/policy/status')); }
+  catch (e) { $('policy').hidden = true; policy = null; }
+  setTimeout(pollPolicy, policy ? 300 : 2000);
+}
+$('p-load').addEventListener('click', () => policyCmd('/api/policy/load', { checkpoint: $('p-ckpt').value }));
+$('p-task').addEventListener('change', () => policyCmd('/api/policy/task', { index: Number($('p-task').value) }));
+$('p-homebtn').addEventListener('click', () => policyCmd('/api/policy/home'));
+$('p-preview').addEventListener('click', () => policyCmd('/api/policy/preview', { on: !(policy && policy.state === 'preview') }));
+$('p-start').addEventListener('click', () => policyCmd('/api/policy/start', { home_first: $('p-homefirst').checked, record: $('p-record').checked }));
+$('p-stop').addEventListener('click', () => policyCmd('/api/policy/stop'));
+pollPolicy();
 
 async function poll() {
   try {

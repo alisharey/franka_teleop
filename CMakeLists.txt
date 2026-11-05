@@ -48,6 +48,10 @@ target_link_options(episode_replay PRIVATE "-Wl,--disable-new-dtags")
 add_executable(save_home_pose src/save_home_pose.cpp)
 target_link_libraries(save_home_pose PRIVATE Franka::Franka)
 target_link_options(save_home_pose PRIVATE "-Wl,--disable-new-dtags")
+
+add_executable(robot_state_stream src/robot_state_stream.cpp)
+target_link_libraries(robot_state_stream PRIVATE Franka::Franka)
+target_link_options(robot_state_stream PRIVATE "-Wl,--disable-new-dtags")
 add_executable(home_gripper src/home_gripper.cpp)
 target_link_libraries(home_gripper PRIVATE Franka::Franka)
 target_link_options(home_gripper PRIVATE "-Wl,--disable-new-dtags")
@@ -59,11 +63,11 @@ target_link_libraries(pose_monitor PRIVATE Franka::Franka)
 target_link_options(pose_monitor PRIVATE "-Wl,--disable-new-dtags")
 target_link_options(gamepad_teleop PRIVATE "-Wl,--disable-new-dtags")
 
-foreach(target controller_probe gamepad_teleop pose_monitor episode_replay home_gripper save_home_pose)
+foreach(target controller_probe gamepad_teleop pose_monitor episode_replay home_gripper save_home_pose robot_state_stream)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endforeach()
 
-install(TARGETS controller_probe gamepad_teleop pose_monitor episode_replay home_gripper save_home_pose DESTINATION lib/${PROJECT_NAME})
+install(TARGETS controller_probe gamepad_teleop pose_monitor episode_replay home_gripper save_home_pose robot_state_stream DESTINATION lib/${PROJECT_NAME})
 
 # Recorder: Python node + web UI.
 ament_python_install_package(franka_teleop_recorder)
