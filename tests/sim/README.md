@@ -33,8 +33,8 @@ tests/sim/run_sim_session.sh /tmp/sim_teleop /tmp/simrun   # about 30 s, real ti
 ## Policy server dry run (no robot, no cameras)
 
 `fake_cameras.py` replays a recorded episode as the camera topics (`--depth`:
-also the aligned depth; `--state`: also `/teleop/state` from the episode bag).
-In a separate ROS domain so
+also the aligned depth; `--state`: also `/teleop/state` from the episode bag,
+for runs with the sim2real background filter). In a separate ROS domain so
 nothing reaches a running robot stack:
 
 ```bash

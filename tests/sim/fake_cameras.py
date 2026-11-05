@@ -9,7 +9,7 @@ policy server without the RealSense cameras.
          16UC1 mm, same stamp as the color frame), from the recorded depth videos
 --state  also /teleop/state at the frame rate: the episode bag's robot state at the
          wrist camera's recorded frame time (O_T_EE, q, gripper), stamped like the frames
-         (needs install/setup.bash sourced).
+         (needs install/setup.bash sourced). For the sim2real background filter in preview.
 """
 import site
 import sys

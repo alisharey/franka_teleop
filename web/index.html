@@ -379,7 +379,7 @@ function renderPolicy(p) {
     $('p-task').innerHTML = p.tasks.map((t, i) => `<option value="${i}">${esc(t)}</option>`).join('');
   }
   if (p.task_index != null) $('p-task').value = String(p.task_index);
-  $('p-loaded').textContent = p.loaded ? `Loaded: ${p.loaded.label}` : 'No checkpoint loaded';
+  $('p-loaded').textContent = p.loaded ? `Loaded: ${p.loaded.label} · observation: ${p.observation || 'camera images'}` : 'No checkpoint loaded';
   $('p-load').disabled = p.state !== 'idle';
   $('p-task').disabled = p.state !== 'idle';
   $('p-homebtn').disabled = p.state !== 'idle' || p.no_motion || !p.home_saved;
@@ -397,7 +397,7 @@ function renderPolicy(p) {
   }
   const l = p.last || {}, a = l.action || [];
   const age = (v) => v == null ? 'none' : v.toFixed(2) + ' s';
-  const cams = Object.entries(p.cameras || {}).map(([c, v]) => `${c} ${age(v)}`).join(' · ');
+  const cams = Object.entries(p.cameras || {}).map(([c, v]) => `${c} ${age(v)}` + (p.depth ? ` (depth ${age(p.depth[c])})` : '')).join(' · ');
   const stats = [
     ['Step', p.loaded ? `${p.step} / ${p.max_steps} @ ${p.rate_hz} Hz` : '–'],
     ['Move dx dy dz [mm]', a.length ? [0, 1, 2].map((i) => fmt(a[i], 1000, 1)).join('  ') : '–'],
@@ -405,7 +405,7 @@ function renderPolicy(p) {
     ['Gripper', a.length ? (a[6] >= 0.5 ? 'open' : 'close') + ` (${a[6].toFixed(2)})` : '–'],
     ['Next 1 s, summed [mm]', l.chunk_xyz_mm ? l.chunk_xyz_mm.map((v) => v.toFixed(0)).join('  ') : '–'],
     ['VQ-BeT entropy · codes', l.entropy != null ? `${l.entropy.toFixed(2)} · ${(l.codes || []).join(', ')}` : '–'],
-    ['Inference', l.compute_ms != null ? `${l.compute_ms} ms` : '–'],
+    ['Inference', l.compute_ms != null ? `${l.compute_ms} ms` + (l.filter_ms != null ? ` + filter ${l.filter_ms} ms` : '') : '–'],
     ['Cameras (frame age)', cams || '–'],
   ];
   $('p-live').innerHTML = stats.map(([k, v]) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');

@@ -35,6 +35,14 @@ policy's input images, VQ-BeT entropies/probabilities, full code distributions,
 picked codes, predicted action chunk, action-token feature, timing), with
 "record" a recorder episode (cameras + robot bag), and with --safe-export the
 failure-detection files task<T>--ep<E>--succ<0|1>.{csv,pkl,meta.json}.
+
+Observation: a run trained on processed camera images says so in
+<run>/observation.json (fetch_run.sh copies it), e.g. the sim2real background filter
+    {"type": "background_filter", "scene": "sim2real/scenes/cups_20261024/scene.json"}
+(optional "calibration", "box"; paths relative to the repository). The server then also
+subscribes to the aligned depth topics and applies sim2real/observation.py to every
+frame before the policy's preprocessing (wrist camera: with O_T_EE at the frame's
+stamp). Without the file the policy sees the raw color frames.
 """
 
 import argparse
@@ -67,7 +75,10 @@ PACKET = struct.Struct('<4sIQQ7d')  # src/policy_input.h
 ACTION_NAMES = ['dx', 'dy', 'dz', 'droll', 'dpitch', 'dyaw', 'dgripper']
 HOME_TOLERANCE_RAD = 0.01
 HOME_TIMEOUT_S = 40.0
-STATE_SAMPLE_S = 0.01      # /teleop/state (1 kHz) decoded at most every 10 ms (status)
+OBSERVATION_FILE = 'observation.json'
+STATE_SAMPLE_S = 0.01      # /teleop/state (1 kHz) decoded at most every 10 ms (status, wrist-filter pose)
+PAIR_TOLERANCE_NS = 5_000_000  # color and aligned depth of one camera share a stamp (enable_sync)
+POSE_TOLERANCE_S = 0.1     # wrist filter: the nearest O_T_EE sample must be this close to the frame
 
 
 def read_home_joints(config_path):
@@ -79,7 +90,7 @@ def read_home_joints(config_path):
 
 
 class RosIO:
-    """Latest color frames per camera and samples of /teleop/state."""
+    """Latest color frames per camera (+ aligned depth while enabled) and samples of /teleop/state."""
 
     def __init__(self, cameras):
         import rclpy
@@ -90,12 +101,16 @@ class RosIO:
 
         self._deserialize = __import__('rclpy.serialization', fromlist=['deserialize_message']).deserialize_message
         self._state_type = TeleopState
+        self._image_type, self._image_qos = Image, qos_profile_sensor_data
         from rclpy.signals import SignalHandlerOptions
         rclpy.init(signal_handler_options=SignalHandlerOptions.NO)  # Ctrl-C / SIGTERM handled in main()
         self.node = Node('baku_policy_server')
         self.lock = threading.Lock()
         self.cameras = list(cameras)
         self.frames = {}  # camera -> deque of (receive time, RGB, stamp_ns), newest last
+        self.depths = {}  # camera -> deque of (receive time, uint16 mm, stamp_ns), while depth is on
+        self._depth_subscriptions = []
+        self.poses = deque(maxlen=400)  # (stamp_ns, O_T_EE 4x4), ~4 s
         self.state = None
         self.state_time = None
         self._last_decode = 0.0
@@ -105,6 +120,21 @@ class RosIO:
         qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=100, reliability=ReliabilityPolicy.RELIABLE)
         self.node.create_subscription(TeleopState, '/teleop/state', self._on_state, qos, raw=True)
         threading.Thread(target=rclpy.spin, args=(self.node,), daemon=True).start()
+
+    def set_depth(self, on):
+        """Subscribes to (or drops) /cameras/<cam>/aligned_depth_to_color/image_raw (16UC1, mm)."""
+        with self.lock:
+            if bool(on) == bool(self._depth_subscriptions):
+                return
+            if on:
+                self._depth_subscriptions = [self.node.create_subscription(
+                    self._image_type, '/cameras/%s/aligned_depth_to_color/image_raw' % camera,
+                    lambda msg, c=camera: self._on_depth(c, msg), self._image_qos) for camera in self.cameras]
+            else:
+                for subscription in self._depth_subscriptions:
+                    self.node.destroy_subscription(subscription)
+                self._depth_subscriptions = []
+                self.depths = {}
 
     @staticmethod
     def _stamp_ns(msg):
@@ -121,6 +151,15 @@ class RosIO:
             self.frames.setdefault(camera, deque(maxlen=6)).append(
                 (time.monotonic(), np.ascontiguousarray(image), self._stamp_ns(msg)))
 
+    def _on_depth(self, camera, msg):
+        if msg.encoding not in ('16UC1', 'mono16'):
+            return
+        depth = np.frombuffer(msg.data, dtype=np.uint16).reshape(msg.height, msg.step // 2)[:, :msg.width]
+        with self.lock:
+            if self._depth_subscriptions:
+                self.depths.setdefault(camera, deque(maxlen=6)).append(
+                    (time.monotonic(), depth.copy(), self._stamp_ns(msg)))
+
     def _on_state(self, data):
         now = time.monotonic()
         if now - self._last_decode < STATE_SAMPLE_S:  # 1 kHz topic: decode ~100 per second
@@ -131,19 +170,92 @@ class RosIO:
                   'motion_enabled': bool(state.motion_enabled), 'deadman': bool(state.deadman),
                   'gripper_width': float(state.gripper_width), 'robot_mode': int(state.robot_mode),
                   'dq_max': float(np.max(np.abs(state.dq)))}
+        pose = np.array(state.o_t_ee).reshape(4, 4, order='F')  # libfranka: column-major
         with self.lock:
             self.state, self.state_time = sample, now
+            self.poses.append((self._stamp_ns(state), pose))
 
-    def latest_frames(self):
-        """camera -> (receive time, RGB, stamp_ns) of its newest frame."""
+    def latest_frames(self, depth=False):
+        """camera -> (receive time, RGB, stamp_ns, depth or None). With depth: the newest color
+        frame that has its aligned depth frame (same stamp); a camera without one is left out."""
         with self.lock:
-            return {c: q[-1] for c, q in self.frames.items() if q}
+            frames = {c: list(q) for c, q in self.frames.items() if q}
+            depths = {c: list(q) for c, q in self.depths.items() if q}
+        out = {}
+        for camera, recent in frames.items():
+            if not depth:
+                out[camera] = recent[-1] + (None,)
+                continue
+            for received, color, stamp in reversed(recent):
+                match = [d for d in depths.get(camera, []) if abs(d[2] - stamp) <= PAIR_TOLERANCE_NS]
+                if match:
+                    out[camera] = (received, color, stamp, match[-1][1])
+                    break
+        return out
+
+    def depth_ages(self):
+        now = time.monotonic()
+        with self.lock:
+            return {c: round(now - q[-1][0], 2) if q else None
+                    for c, q in ((c, self.depths.get(c)) for c in self.cameras)}
+
+    def ee_pose_at(self, stamp_ns):
+        """O_T_EE of the /teleop/state sample nearest to stamp_ns (None if none within POSE_TOLERANCE_S)."""
+        with self.lock:
+            poses = list(self.poses)
+        if not poses:
+            return None
+        stamp, pose = min(poses, key=lambda p: abs(p[0] - stamp_ns))
+        return pose if abs(stamp - stamp_ns) <= POSE_TOLERANCE_S * 1e9 else None
+
+    def latest_pose(self):
+        """Newest O_T_EE (None without a recent /teleop/state)."""
+        with self.lock:
+            if not self.poses or self.state_time is None or time.monotonic() - self.state_time > 1.0:
+                return None
+            return self.poses[-1][1]
 
     def robot(self):
         with self.lock:
             if self.state is None or time.monotonic() - self.state_time > 1.0:
                 return None
             return dict(self.state)
+
+
+def read_observation(checkpoint):
+    """<run>/observation.json next to snapshot/ (None: raw camera frames)."""
+    path = Path(checkpoint).parents[1] / OBSERVATION_FILE
+    if not path.exists():
+        return None
+    spec = json.loads(path.read_text())
+    if spec.get('type') != 'background_filter':
+        raise RuntimeError('%s: unknown observation type %r' % (path, spec.get('type')))
+    return spec
+
+
+class BackgroundObservation:
+    """observation.json type background_filter: sim2real/observation.py (the training data's
+    filter) on each live color frame with its aligned depth; real camera depth scale."""
+
+    label = 'background filter'
+    needs_depth = True
+
+    def __init__(self, spec):
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from sim2real.observation import DEFAULT_BOX, DEFAULT_CALIBRATION, DEFAULT_SCENE, WRIST, BackgroundFilter
+        self.spec = spec
+        scene = ROOT / spec.get('scene', DEFAULT_SCENE)  # relative to the repository (or absolute)
+        calibration = ROOT / spec.get('calibration', DEFAULT_CALIBRATION)
+        box = tuple(spec.get('box', DEFAULT_BOX))
+        self.filter = BackgroundFilter(scene, calibration, box, sim=False)
+        self.wrist = WRIST
+
+    def needs_pose(self, camera):
+        return camera == self.wrist
+
+    def apply(self, camera, color, depth_mm, ee_pose=None):
+        return self.filter.apply(camera, color, depth_mm, ee_pose)
 
 
 class Link:
@@ -210,6 +322,7 @@ class Server:
         self.error = None
         self.policy = None
         self.loaded = None
+        self.observation = None  # BackgroundObservation when the run has observation.json
         self.step = 0
         self.last = {}
         self.log = None
@@ -247,14 +360,31 @@ class Server:
         return {c: round(now - frames[c][0], 2) if c in frames else None for c in ('cam_1', 'cam_2')}
 
     def fresh_frames(self):
-        """{policy key: RGB frame}, or (None, what is missing) when a camera is older than --camera-timeout-s."""
-        frames = self.ros.latest_frames()
+        """{policy key: RGB frame} with the run's observation applied (background filter: with
+        the aligned depth and, wrist camera, O_T_EE at the frame's stamp), or (None, what is
+        missing) when a camera, its depth or the pose is older than --camera-timeout-s."""
+        observation = self.observation
+        frames = self.ros.latest_frames(depth=observation is not None)
         now = time.monotonic()
         out = {}
         for key, camera in self.policy.cameras.items():
             if camera not in frames or now - frames[camera][0] > self.args.camera_timeout_s:
-                return None, 'camera %s' % camera
-            out[key] = frames[camera][1]
+                return None, ('%s color+depth' if observation else 'camera %s') % camera
+            received, color, stamp, depth = frames[camera]
+            if observation is None:
+                out[key] = color
+                continue
+            pose = None
+            if observation.needs_pose(camera):
+                pose = self.ros.ee_pose_at(stamp)
+                if pose is None:
+                    return None, 'robot pose (/teleop/state) for the %s filter' % camera
+            out[key] = observation.apply(camera, color, depth, pose)
+        if getattr(self.policy, 'needs_robot', False):  # e.g. the sim2real SAC actor: + EE position, gripper width
+            robot, pose = self.ros.robot(), self.ros.latest_pose()
+            if robot is None or pose is None:
+                return None, 'robot state (/teleop/state)'
+            self.policy.set_robot(pose, robot['gripper_width'])
         return out, None
 
     def status(self):
@@ -264,7 +394,9 @@ class Server:
                 action = self.last.get('action')
                 last = {'action': None if action is None else [round(float(v), 4) for v in action],
                         'entropy': self.last.get('entropy_avg'), 'codes': self.last.get('codes'),
-                        'chunk_xyz_mm': self.last.get('chunk_xyz_mm'), 'compute_ms': self.last.get('compute_ms')}
+                        'chunk_xyz_mm': self.last.get('chunk_xyz_mm'), 'compute_ms': self.last.get('compute_ms'),
+                        'filter_ms': self.last.get('filter_ms')}
+            observation = self.observation
             return {
                 'ok': True, 'state': self.state, 'message': self.message, 'error': self.error,
                 'no_motion': self.args.no_motion, 'checkpoints': self.checkpoints(),
@@ -273,6 +405,8 @@ class Server:
                 'step': self.step, 'max_steps': self.args.max_steps,
                 'rate_hz': round(self.policy.rate_hz, 2) if self.policy else None,
                 'last': last, 'cameras': self.camera_ages(), 'robot': self.robot_status(),
+                'observation': observation.label if observation else None,
+                'depth': self.ros.depth_ages() if observation else None,
                 'home_saved': self.home_joints is not None, 'gpu_free_mb': gpu_free_mb(),
                 'last_run': None if self.last_run is None else {
                     k: self.last_run[k] for k in ('id', 'steps', 'outcome', 'reason', 'record_episode')},
@@ -320,14 +454,31 @@ class Server:
         from franka.policy import FrankaPolicy
         self.policy = None
         self.loaded = None
+        self.observation = None
+        self.ros.set_depth(False)
         torch.cuda.empty_cache()
-        policy = FrankaPolicy(checkpoint, device=self.args.device, max_steps=self.args.max_steps)
-        policy.act({k: np.zeros((480, 640, 3), np.uint8) for k in policy.pixel_keys})  # warm up CUDA kernels
+        spec = read_observation(checkpoint)
+        observation = BackgroundObservation(spec) if spec else None
+        if str(ROOT) not in sys.path:
+            sys.path.insert(0, str(ROOT))
+        from sim2real.sac_policy import SACPolicy, is_sac_run
+        policy_class = SACPolicy if is_sac_run(checkpoint) else FrankaPolicy  # <run>/policy.json type "sac"
+        policy = policy_class(checkpoint, device=self.args.device, max_steps=self.args.max_steps)
+        if getattr(policy, 'needs_robot', False):
+            policy.set_robot(np.eye(4), 0.08)  # for the warm-up below
+        blank = {k: np.zeros((480, 640, 3), np.uint8) for k in policy.pixel_keys}
+        if observation:  # also builds the filter's per-pixel rays
+            blank = {k: observation.apply(policy.cameras[k], v, np.zeros(v.shape[:2], np.uint16), np.eye(4))
+                     for k, v in blank.items()}
+            self.ros.set_depth(True)
+        policy.act(blank)  # warm up CUDA kernels
         policy.reset()
         self.policy = policy
+        self.observation = observation
         name, short = checkpoint_label(checkpoint)
-        self.loaded = {'path': checkpoint, 'label': name, 'short': short, 'task': policy.task_text}
-        self._set('idle', 'Loaded %s.' % name)
+        self.loaded = {'path': checkpoint, 'label': name, 'short': short, 'task': policy.task_text,
+                       'observation': spec, 'policy': 'sac' if policy_class is SACPolicy else 'baku'}
+        self._set('idle', 'Loaded %s%s.' % (name, ' (observation: %s)' % observation.label if observation else ''))
 
     def set_task(self, index):
         with self.lock:
@@ -419,7 +570,7 @@ class Server:
         log = {'id': '%s_%s_task%d' % (stamp, self.loaded['short'], policy.task_index), 'checkpoint': self.loaded,
                't': [], 'action': [], 'raw_action': [], 'entropy_avg': [], 'token_entropy': [], 'token_prob': [],
                'code_probs': [], 'codes': [], 'action_chunk': [], 'feature': [], 'images': [], 'compute_ms': [],
-               'camera_age_s': [], 'executed': execute}
+               'camera_age_s': [], 'filter_ms': [], 'executed': execute}
         self.record_episode = None
         if execute:
             if self.want_record:
@@ -438,7 +589,7 @@ class Server:
                 reason = 'no robot state (teleop stopped?)'
                 break
             began = time.monotonic()
-            frames, missing = self.fresh_frames()
+            frames, missing = self.fresh_frames()  # with the run's observation (background filter) applied
             if frames is None:  # hold still; give up if the camera stays stale
                 if execute:
                     self.link.hold()
@@ -456,9 +607,11 @@ class Server:
                 stale_since = None
                 with self.lock:
                     self.message = message
-            policy_input = policy.preprocess(frames)  # the 128x128 images, also logged
+            filtered = time.monotonic()
+            policy_input = policy.preprocess(frames)  # the policy's input images (BAKU 128x128, SAC 84x84), also logged
             raw = policy.act(policy_input, preprocessed=True)
-            compute_ms = (time.monotonic() - began) * 1000
+            compute_ms = (time.monotonic() - filtered) * 1000
+            filter_ms = (filtered - began) * 1000
             action = raw.copy()
             norm = np.linalg.norm(action[:3])
             if norm > self.args.max_position_m:
@@ -475,7 +628,8 @@ class Server:
                              'codes': None if last.get('codes') is None else [int(c) for c in last['codes']],
                              'chunk_xyz_mm': None if chunk is None else
                              [round(float(v), 1) for v in 1000 * chunk[:, :3].sum(axis=0)],
-                             'compute_ms': round(compute_ms, 1)}
+                             'compute_ms': round(compute_ms, 1),
+                             'filter_ms': round(filter_ms, 1) if self.observation else None}
             ages = self.camera_ages()
             log['t'].append(began - start)
             log['action'].append(action)
@@ -489,6 +643,8 @@ class Server:
             log['feature'].append(last.get('feature', np.full(256, np.nan, np.float32)))
             log['images'].append(np.stack([policy_input[k] for k in policy.pixel_keys]))
             log['compute_ms'].append(compute_ms)
+            if self.observation:
+                log['filter_ms'].append(filter_ms)
             log['camera_age_s'].append([ages[c] if ages[c] is not None else math.nan for c in ('cam_1', 'cam_2')])
             if policy.step_index >= self.args.max_steps:
                 if not execute:
@@ -605,7 +761,8 @@ def write_safe_export(folder, log, policy, args, success, intervention, notes, t
                                                                                           args.max_rotation_rad),
             'executed_action': 'the CSV holds the actions sent (after the clip); the robot tracked them through '
                                'the teleop controller (recorded in the bag when the episode was recorded)',
-            'intervention': bool(intervention), 'notes': notes, 'task_description': policy.task_text}
+            'intervention': bool(intervention), 'notes': notes, 'task_description': policy.task_text,
+            'observation': (log['checkpoint'].get('observation') or {}).get('type', 'camera')}
     Path(str(stem) + '.meta.json').write_text(json.dumps(meta, indent=2, sort_keys=True) + '\n')
     return stem
 

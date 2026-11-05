@@ -9,9 +9,13 @@ normalization). Training runs on the HPC in a checkout of the same branch
 |---|---|
 | `upload_episodes.sh --task "..." <episodes>` | exports episodes (robot state, TeleMoMa actions, color videos; no depth; `tools/baku/export.sh`) and uploads them to the HPC |
 | `sync_baku.sh push` / `pull` | copy local edits of `vla/BAKU` to the HPC checkout (commit there) / update `vla/BAKU` to the branch's latest commit |
-| `fetch_run.sh <run>/snapshot/<step>.pt` | copies a trained snapshot and its config from the HPC to `runs/` (the page lists everything in `runs/`) |
+| `fetch_run.sh <run>/snapshot/<step>.pt` | copies a trained snapshot, its config and `observation.json` (if any) from the HPC to `runs/` (the page lists everything in `runs/`) |
 | `setup_local.sh` | once: checks out `vla/BAKU`, creates `.venv` (PyTorch 2.3.1 cu121, the cluster env's versions) |
 | `deploy.py` | the policy server (started by `./record.sh --deploy`); `deploy.sh --no-motion` runs it alone, preview only |
+
+A run with `policy.json` `{"type": "sac"}` (e.g. `runs/sac_cups_v2`, the Isaac Lab SAC actor; see
+`sim2real/README.md`) is loaded with `sim2real/sac_policy.py` instead of BAKU: same panel, same
+filter, it also reads the end-effector pose and gripper width from `/teleop/state`.
 
 ## Running a policy on the robot
 
@@ -39,6 +43,18 @@ demonstrations (`src/policy_input.h`). No action for `policy_timeout_ms`
 (300 ms) stops the arm; a camera without frames for 1 s, or the teleop
 stopping, ends the episode. Keep the stop button in reach.
 
+## Runs trained on filtered images (sim2real)
+
+A run folder with `observation.json`, e.g.
+`{"type": "background_filter", "scene": "sim2real/scenes/cups_20261024/scene.json"}`,
+was trained on background-filtered images (`sim2real/observation.py`). On Load
+the server then also subscribes to the cameras' aligned depth and applies the
+same filter to every live frame (wrist camera with O_T_EE at the frame's stamp)
+before the policy's preprocessing; the panel shows "observation: background
+filter" and the filter time (~20 ms per step). Missing depth or robot pose
+holds like a stale camera. Without the file nothing changes. See
+`sim2real/README.md`.
+
 ## What a rollout records
 
 - `~/franka_policy_rollouts/<time>_<checkpoint>_task<N>/rollout.npz`, per policy
@@ -46,7 +62,7 @@ stopping, ends the episode. Keep the stop button in reach.
   policy saw, the 10-step action chunk it predicted, the picked VQ-BeT codes, the
   full code distributions (2 x 16), their entropies and the picked codes'
   probabilities, the 256-d action-token feature, inference time and camera
-  frame age; `rollout.json`: checkpoint, task, steps, outcome, recorder episode.
+  frame age (and the filter time for a filtered run); `rollout.json`: checkpoint, task, steps, outcome, recorder episode.
 - With "record episode": a recorder episode named `policy_<checkpoint>_<time>`
   (camera videos, the 1 kHz robot bag including `/teleop/quest` with the
   executed target and tracking error, success label, notes with the checkpoint).

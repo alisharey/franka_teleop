@@ -7,3 +7,4 @@ third_party/
 vla/baku/.venv/
 vla/baku/runs/
 tools/calibration/.venv/
+sim2real/assets/

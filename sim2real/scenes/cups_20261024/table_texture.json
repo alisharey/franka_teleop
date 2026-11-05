@@ -1,0 +1,19 @@
+{
+ "texture": "table_texture.png",
+ "x_m": [
+  -0.3,
+  1.019557724100732
+ ],
+ "y_m": [
+  -0.39076019108234256,
+  0.44999999999999996
+ ],
+ "mm_per_texel": 2.0,
+ "size_px": [
+  660,
+  420
+ ],
+ "layout": "columns along +x, rows from y_max (top) to y_min",
+ "episodes": 40,
+ "filled_fraction": 0.19398268398268398
+}
