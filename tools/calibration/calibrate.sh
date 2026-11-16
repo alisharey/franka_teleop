@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Camera calibration from one recorded episode and the AprilTag on the table.
+# Camera calibration from one recorded episode and the ChArUco board on the table
+# (or the AprilTag, --target apriltag).
 #
 # Record an episode (./record.sh, Quest or gamepad) in which the arm stops at
-# 15-25 poses where the WRIST camera sees the tag, tilting the gripper 20-40 deg
+# 15-25 poses where the WRIST camera sees the board, tilting the gripper 20-40 deg
 # about different axes between stops (pause ~1 s at each); the third-person
-# camera should see the tag too. Then:
+# camera should see it too. Then:
 #
-#   tools/calibration/calibrate.sh ~/franka_teleop_data/<episode> [options]
+#   tools/calibration/calibrate.sh data/teleop/<episode> --square-size 0.0337 --marker-size 0.025 [options]
 #
 # Writes <episode>/calibration/calibration.json (T_base_cam_2, T_ee_cam_1,
 # T_base_tag, intrinsics, residuals) and check images, and copies the JSON to

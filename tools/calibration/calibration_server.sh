@@ -2,7 +2,8 @@
 # Camera calibration page (http://localhost:8770): hand-guide the arm in
 # Programming mode, take snapshots, calibrate. Read-only: never moves the robot.
 # Close ./record.sh and realsense-viewer first (they hold the cameras).
-#   tools/calibration/calibration_server.sh [--session ~/franka_calibration/<folder>]
+#   tools/calibration/calibration_server.sh --square-size 0.0337 --marker-size 0.025 [--session ~/franka_calibration/<folder>]
+# (the ChArUco board's square and marker edges in metres, measured on the print; --target apriltag for the tag)
 set -eo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ ! -x "$HERE/.venv/bin/python" ]]; then  # OpenCV 4.x: the 5.0.0 Python package lacks calibrateHandEye

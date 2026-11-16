@@ -2,7 +2,8 @@
 """Camera calibration page: hand-guide the arm, take snapshots, calibrate.
 
 Put the robot in Programming mode in Desk (FCI active), guide the arm by hand
-to a pose where the wrist camera sees the AprilTag on the table, let go, click
+to a pose where the wrist camera sees the ChArUco board on the table (or an AprilTag, --target apriltag),
+let go, click
 Snapshot. Repeat 15-25 times with different gripper tilts, then Calibrate.
 
 Nothing here commands the robot: the robot state comes from robot_state_stream
@@ -29,7 +30,6 @@ import sys
 import threading
 import time
 from datetime import datetime
-from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -40,7 +40,7 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE))
-from calibrate_cameras import (HAND_EYE_METHODS, TagDetector, angle_deg, draw_axes, hand_eye,  # noqa: E402
+from calibrate_cameras import (HAND_EYE_METHODS, add_target_arguments, angle_deg, draw_axes, hand_eye, make_detector,  # noqa: E402
                                inverse, mean_pose)
 
 STILL_RAD_S = 0.01
@@ -204,7 +204,9 @@ class Session:
                     continue
                 dets = self.detect(color, name)
                 self.live[name] = [{'id': d['id'], 'distance_m': round(float(np.linalg.norm(d['pose'][:3, 3])), 3),
-                                    'corners': d['corners'].tolist(), 'margin': round(d['margin'], 1)} for d in dets]
+                                    'outline': d.get('outline', d['corners']).tolist(),
+                                    'label': d.get('label', 'tag %d' % d['id']),
+                                    'margin': round(d['margin'], 1)} for d in dets]
             time.sleep(0.2)
 
     # ------------------------------------------------------------------ snapshots
@@ -300,6 +302,7 @@ class Session:
                          'reprojection_px': round(r, 2)} for s, m, d, r in zip(usable, spread_mm, spread_deg, reproj)]
 
         result = {'session': str(self.root), 'tag_id': tag_id, 'snapshots_used': len(usable),
+                  'target': getattr(self.detector, 'description', 'AprilTag'),
                   'hand_eye_method': method, 'frames': {'base': 'robot base (libfranka O)',
                                                         'ee': 'libfranka EE frame (O_T_EE)',
                                                         'camera': 'optical: x right, y down, z forward'},
@@ -347,6 +350,10 @@ class Session:
             result['check_images'] = checks
         else:
             result['warning'] = 'the %s camera did not see tag %d in any snapshot' % (self.static, tag_id)
+        result['verdict'] = verdict(result)
+        print('\nCalibration %s: %s' % (self.root.name, result['verdict']['level']), flush=True)
+        for note in result['verdict']['notes']:
+            print('  - ' + note, flush=True)
         (self.root / 'calibration.json').write_text(json.dumps(result, indent=1))
         shutil.copy(self.root / 'calibration.json', ROOT / 'config' / 'camera_calibration.json')
         self.last_calibration = result
@@ -374,7 +381,74 @@ class Session:
                 'diversity': self.diversity(snaps), 'busy': self.busy, 'wrist': self.wrist, 'static': self.static,
                 'calibration': None if not self.last_calibration else {
                     k: self.last_calibration.get(k) for k in ('snapshots_used', 'stats', 'per_snapshot', 'check_images',
-                                                              'warning', 'tag_id')}}
+                                                              'warning', 'tag_id', 'verdict', 'target')}}
+
+
+def verdict(result):
+    """Good enough, or what to collect / fix: from the agreement between snapshots (the board does not move, so
+    every snapshot should put it at the same place in the base frame) and the wrist camera's reprojection."""
+    t, notes = result['stats'], []
+    level = 'GOOD'
+
+    def worse(new):
+        nonlocal level
+        order = ['GOOD', 'OK', 'COLLECT MORE', 'CHECK THE SETUP']
+        level = max(level, new, key=order.index)
+    if result['snapshots_used'] < 12:
+        worse('COLLECT MORE')
+        notes.append('%d snapshots: take 15-25' % result['snapshots_used'])
+    if t['orientation_span_deg'] < 40:
+        worse('COLLECT MORE')
+        notes.append('gripper tilt span %.0f deg: tilt more (aim for 40+ deg, in different directions)' % t['orientation_span_deg'])
+    if t['tag_spread_mm_median'] > 3 or t['wrist_reprojection_px_median'] > 2:
+        worse('CHECK THE SETUP')
+        notes.append('snapshots disagree (board %.1f mm apart, wrist reprojection %.1f px; good: < 3 mm, < 2 px): '
+                     'check --square-size / --marker-size against a ruler, that the board is flat and did not move, '
+                     'and that the camera mount is tight' % (t['tag_spread_mm_median'], t['wrist_reprojection_px_median']))
+    elif t['tag_spread_mm_median'] > 1.5 or t['wrist_reprojection_px_median'] > 1:
+        worse('OK')
+        notes.append('usable; more snapshots at different distances would tighten it (board %.1f mm apart, %.1f px)'
+                     % (t['tag_spread_mm_median'], t['wrist_reprojection_px_median']))
+    median = t['tag_spread_mm_median']
+    outliers = [p['index'] for p in result['per_snapshot'] if p['tag_offset_mm'] > max(2.5 * median, median + 3)]
+    if outliers:
+        worse('OK')
+        notes.append('outlier snapshots (delete them and calibrate again): %s' % ', '.join(map(str, outliers)))
+    disagree = max(v[0] for v in t['hand_eye_methods_vs_chosen_mm_deg'].values())
+    if disagree > 3:
+        worse('COLLECT MORE')
+        notes.append('the hand-eye methods differ by up to %.1f mm: the poses do not pin it down; add tilts' % disagree)
+    if 'static_snapshots' not in t:
+        worse('CHECK THE SETUP')
+        notes.append('the static camera never saw the board')
+    elif t['static_tag_spread_mm_median'] > 2:
+        worse('OK')
+        notes.append('the static camera sees the board inconsistently (%.1f mm): light, glare or occlusion by the arm?'
+                     % t['static_tag_spread_mm_median'])
+    if not notes:
+        notes.append('snapshots agree (board %.1f mm, %.1f px): done' % (median, t['wrist_reprojection_px_median']))
+    return {'level': level, 'notes': notes}
+
+
+def draw_calibration(session, name, image):
+    """The loaded calibration over the live view: on the static camera the base axes and the gripper (EE) axes
+    from the robot's joint readings, which must stay on the real gripper while the arm moves; on the wrist
+    camera the board where the calibration predicts it (base -> EE -> camera), which must sit on the real board."""
+    cal, camera, state = session.last_calibration, session.cameras[name], session.robot.snapshot()
+    if not cal or camera.K is None or 'T_base_tag' not in cal:
+        return
+    t_base_ee = np.array(state['O_T_EE']).reshape(4, 4, order='F') if state else None
+    if name == session.static and 'T_base_cam_' + name in cal:
+        cam_from_base = inverse(np.array(cal['T_base_cam_' + name]))
+        draw_axes(image, camera.K, cam_from_base, 0.12, 'base')
+        draw_axes(image, camera.K, cam_from_base @ np.array(cal['T_base_tag']), 0.05, 'board (calibrated)')
+        if t_base_ee is not None:
+            draw_axes(image, camera.K, cam_from_base @ t_base_ee, 0.06, 'gripper (joints)')
+    elif name == session.wrist and 'T_ee_cam_' + name in cal and t_base_ee is not None:
+        cam_from_base = inverse(t_base_ee @ np.array(cal['T_ee_cam_' + name]))
+        draw_axes(image, camera.K, cam_from_base @ np.array(cal['T_base_tag']), 0.05, 'board (predicted)')
+    cv2.putText(image, 'overlay: %s' % Path(cal.get('session', '?')).name, (10, image.shape[0] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1, cv2.LINE_AA)
 
 
 def mjpeg_frame(session, name):
@@ -385,10 +459,11 @@ def mjpeg_frame(session, name):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
     else:
         image = color.copy()
+        draw_calibration(session, name, image)
         for det in session.live.get(name) or []:
-            corners = np.array(det['corners'], np.int32)
+            corners = np.array(det['outline'], np.int32)
             cv2.polylines(image, [corners], True, (0, 255, 0), 2)
-            cv2.putText(image, 'tag %d  %.2f m' % (det['id'], det['distance_m']), tuple(corners[0] + [0, -8]),
+            cv2.putText(image, '%s  %.2f m' % (det['label'], det['distance_m']), tuple(corners[corners[:, 1].argmin()] + [0, -8]),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     return cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 75])[1].tobytes()
 
@@ -482,9 +557,9 @@ def main():
     parser.add_argument('--root', default=str(Path.home() / 'franka_calibration'))
     parser.add_argument('--wrist', default='cam_1')
     parser.add_argument('--static', default='cam_2')
-    parser.add_argument('--family', default='tagStandard41h12')
-    parser.add_argument('--tag-size', type=float, default=0.0556, help='black-square edge [m]')
+    add_target_arguments(parser)
     args = parser.parse_args()
+    cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)  # overlay axes leaving the image are fine
 
     serials = read_camera_config(ROOT / 'config' / 'recording.yaml')
     robot_ip = read_robot_ip(ROOT / 'config' / 'teleop.conf')
@@ -497,11 +572,13 @@ def main():
     robot = Robot(robot_ip, str(binary))
     robot.start()
     root = Path(args.session) if args.session else Path(args.root) / datetime.now().strftime('%Y%m%d_%H%M%S')
-    session = Session(root, cameras, robot, TagDetector(args.family, args.tag_size, -1), args.wrist, args.static)
+    detector = make_detector(args)
+    session = Session(root, cameras, robot, detector, args.wrist, args.static)
     server = ThreadingHTTPServer(('127.0.0.1', args.port), make_handler(session, HERE / 'web' / 'index.html'))
     server.daemon_threads = True
-    print('Calibration page: http://localhost:%d   (session %s, robot %s, cameras %s)' % (
-        args.port, root, robot_ip, {n: c.serial for n, c in cameras.items()}), flush=True)
+    print('Calibration page: http://localhost:%d   (session %s, robot %s, cameras %s, target %s)' % (
+        args.port, root, robot_ip, {n: c.serial for n, c in cameras.items()},
+        getattr(detector, 'description', 'AprilTag %s' % args.family)), flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

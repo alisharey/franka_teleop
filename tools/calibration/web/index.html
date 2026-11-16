@@ -165,7 +165,9 @@ function render(s) {
     if (t.static_snapshots) rows.push(['Static cam: tag distance', `${t.static_tag_distance_m.toFixed(2)} m (${t.static_snapshots} snapshots)`],
       ['Static cam: tag spread (median)', `${t.static_tag_spread_mm_median.toFixed(1)} mm · ${t.static_tag_spread_deg_median.toFixed(2)}°`]);
     $('stats').innerHTML = rows.map(([k, v]) => `<div class="stat"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('');
-    $('rwarn').textContent = cal.warning || 'Saved to the session folder and config/camera_calibration.json.';
+    const v = cal.verdict;
+    $('rwarn').innerHTML = (v ? `<b>${esc(v.level)}</b>: ${v.notes.map(esc).join(' · ')}<br>` : '') +
+      esc(cal.warning || 'Saved to the session folder and config/camera_calibration.json.');
     $('checks').innerHTML = (cal.check_images || []).map((p) => `<img src="/files/${p}?t=${Date.now()}" alt="check image">`).join('');
   }
 }

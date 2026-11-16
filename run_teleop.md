@@ -119,23 +119,27 @@ cable in, `tools/quest/quest_wifi.sh`, cable out.
 ## Camera calibration (camera poses for point clouds / sim)
 
 Gives the third-person camera's pose in the robot base frame and the wrist
-camera's pose on the gripper, from one recording and the AprilTag on the table
-(tagStandard41h12, id 4, 55.6 mm black square). Leave the tag where it is while
-recording; the cameras must not move afterwards (the tag may).
+camera's pose on the gripper, from the ChArUco board on the table
+(`tools/calibration/charuco_5x7_35mm_A4.pdf`, 5x7 squares, DICT_4X4_50; print it
+at 100 % and measure a square and a marker: printers scale). The cameras must
+not move afterwards.
 
-1. `./record.sh --quest`, press A to record.
-2. Move the arm to 15-25 poses where the **wrist camera** sees the tag, and
-   **stop about 1 s at each**. Between stops, tilt the gripper 20-40 deg about
-   different axes (not just sliding it around); keep the tag 20-50 cm from the
-   wrist camera. The third-person camera should see the tag too.
-3. Stop the recording, then:
+1. Close `./record.sh`. In Desk, Programming mode with FCI active.
+2. Start the calibration page with the measured sizes (in metres) and open
+   http://localhost:8770:
    ```bash
-   tools/calibration/calibrate.sh ~/franka_teleop_data/<episode>
+   tools/calibration/calibration_server.sh --square-size 0.0337 --marker-size 0.025
    ```
-   It prints the residuals (tag spread in mm/deg, reprojection in px), writes
-   `<episode>/calibration/` (calibration.json + check images with the robot's base
-   and end-effector axes drawn into the third-person view) and copies the result to
+   (`--session ~/franka_calibration/<folder>` adds to an earlier session.)
+3. Guide the arm by hand to 15-25 poses where the **wrist camera** sees the
+   board, tilting the gripper 20-40 deg about different axes between them; let go
+   and click **Snapshot** at each. The third-person camera should see the board too.
+4. **Calibrate**: it prints a verdict (GOOD / OK / COLLECT MORE / CHECK THE SETUP)
+   with the residuals, draws the result over the live views, and copies it to
    `config/camera_calibration.json`.
+
+From a recording instead (arm stopping ~1 s at each pose):
+`tools/calibration/calibrate.sh data/teleop/<episode> --square-size ... --marker-size ...`.
 
 ## Running a trained policy
 

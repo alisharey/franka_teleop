@@ -98,6 +98,93 @@ def read_frames_csv(path):
     return np.array([int(r['frame']) for r in rows]), np.array([int(r['stamp_ns']) for r in rows], dtype=np.int64)
 
 
+class BoardDetector:
+    """A ChArUco board (chessboard with ArUco markers in its white squares) as the calibration target, with the
+    same interface as TagDetector. Many corners with known positions give a much better pose than one tag.
+
+    Board frame (OpenCV): origin at the board's outer corner next to the first marker, x along the columns,
+    y along the rows, in the board plane. The board must lie flat and still for the whole session."""
+
+    def __init__(self, dictionary, squares, square_size, marker_size, min_corners=6):
+        self.dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dictionary))
+        self.squares, self.square_size, self.marker_size = squares, square_size, marker_size
+        self.min_corners = min_corners
+        # boards printed by OpenCV < 4.6 place the markers differently ("legacy"): tried both until one matches
+        self.patterns = {}
+        for legacy in (False, True):
+            board = cv2.aruco.CharucoBoard(squares, square_size, marker_size, self.dictionary)
+            board.setLegacyPattern(legacy)
+            self.patterns[legacy] = (board, cv2.aruco.CharucoDetector(board))
+        self.legacy = None
+        self.description = 'ChArUco %dx%d squares, %s, square %.1f mm, marker %.1f mm' % (
+            squares[0], squares[1], dictionary, square_size * 1000, marker_size * 1000)
+
+    def _corners(self, gray, legacy):
+        board, detector = self.patterns[legacy]
+        corners, ids, _, _ = detector.detectBoard(gray)
+        if ids is None:
+            return board, np.zeros((0, 2)), np.zeros(0, int)
+        return board, corners.reshape(-1, 2).astype(float), ids.flatten().astype(int)
+
+    def detect(self, bgr, camera_matrix):
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        tries = [self.legacy] if self.legacy is not None else [False, True]
+        board, pixels, ids = max((self._corners(gray, legacy) + (legacy,) for legacy in tries),
+                                 key=lambda r: len(r[2]))[:3]
+        if len(ids) < self.min_corners:
+            return []
+        if self.legacy is None:
+            self.legacy = next(k for k, v in self.patterns.items() if v[0] is board)
+        points = board.getChessboardCorners()[ids].astype(float)
+        ok, rvec, tvec = cv2.solvePnP(points, pixels, camera_matrix, None, flags=cv2.SOLVEPNP_IPPE)
+        if not ok:
+            return []
+        rvec, tvec = cv2.solvePnPRefineLM(points, pixels, camera_matrix, None, rvec, tvec)
+        pose = make_pose(cv2.Rodrigues(rvec)[0], tvec)
+        error = float(np.sqrt(np.mean(np.sum((self._project(points, pose, camera_matrix) - pixels) ** 2, axis=1))))
+        # outline: the board's outer edge from the pose (the corners used are the inner chessboard corners,
+        # one square in from the edge)
+        w, h = self.squares[0] * self.square_size, self.squares[1] * self.square_size
+        hull = self._project(np.array([[0, 0, 0], [w, 0, 0], [w, h, 0], [0, h, 0]], float), pose, camera_matrix)
+        return [{'id': 0, 'pose': pose, 'corners': np.column_stack([ids, pixels]), 'outline': hull,
+                 'margin': float(len(ids)), 'pose_err': error, 'label': 'board: %d corners' % len(ids)}]
+
+    @staticmethod
+    def _project(points, pose, camera_matrix):
+        cam = (pose[:3, :3] @ points.T).T + pose[:3, 3]
+        pixels = (camera_matrix @ cam.T).T
+        return pixels[:, :2] / pixels[:, 2:3]
+
+    def reprojection_px(self, detected_corners, predicted_pose, own_pose, camera_matrix):
+        """Mean error of the detected corners ([id, u, v] rows) against the predicted board pose."""
+        detected = np.asarray(detected_corners, float)
+        board = self.patterns[bool(self.legacy)][0]
+        points = board.getChessboardCorners()[detected[:, 0].astype(int)].astype(float)
+        predicted = self._project(points, predicted_pose, camera_matrix)
+        return float(np.mean(np.linalg.norm(predicted - detected[:, 1:], axis=1)))
+
+
+def make_detector(args, tag_id=-1):
+    """--target charuco (default) or apriltag, from the command line options of both tools."""
+    if args.target == 'apriltag':
+        return TagDetector(args.family, args.tag_size, tag_id)
+    if not args.square_size or not args.marker_size:
+        sys.exit('measure the printed board: --square-size (chessboard square edge) and --marker-size '
+                 '(ArUco marker edge), in metres')
+    columns, rows = (int(v) for v in args.board.lower().split('x'))
+    return BoardDetector(args.board_dict, (columns, rows), args.square_size, args.marker_size)
+
+
+def add_target_arguments(parser):
+    parser.add_argument('--target', default='charuco', choices=['charuco', 'apriltag'])
+    parser.add_argument('--board', default='5x7', help='ChArUco board squares, columns x rows')
+    parser.add_argument('--board-dict', default='DICT_4X4_50', help='ArUco dictionary of the board')
+    parser.add_argument('--square-size', type=float, help='ChArUco chessboard square edge [m], measured on the print')
+    parser.add_argument('--marker-size', type=float, help='ChArUco marker edge [m], measured on the print')
+    parser.add_argument('--family', default='tagStandard41h12', help='AprilTag family (--target apriltag)')
+    parser.add_argument('--tag-size', type=float, default=0.0556, help='AprilTag black-square edge [m]')
+
+
 _KEEP_ALIVE = []  # pupil_apriltags 1.0.4 crashes when a Detector is freed: never free it
 
 
@@ -207,7 +294,7 @@ def calibrate(args):
     episode = Path(args.episode)
     meta = json.loads((episode / 'meta.json').read_text())
     robot = dict(np.load(args.poses))
-    detector = TagDetector(args.family, args.tag_size, args.tag_id)
+    detector = make_detector(args, args.tag_id)
     return _calibrate(args, episode, meta, robot, detector)
 
 
@@ -360,8 +447,7 @@ def main():
     parser.add_argument('--poses', help='robot poses from extract_robot_poses.py')
     parser.add_argument('--wrist', default='cam_1', help='camera on the gripper')
     parser.add_argument('--static', default='cam_2', help='fixed third-person camera')
-    parser.add_argument('--family', default='tagStandard41h12')
-    parser.add_argument('--tag-size', type=float, default=0.0556, help='black-square edge [m] (as apriltag_pose.py)')
+    add_target_arguments(parser)
     parser.add_argument('--tag-id', type=int, default=-1, help='tag id (default: the one the wrist camera saw most)')
     parser.add_argument('--method', default='park', choices=sorted(HAND_EYE_METHODS), help='cv2.calibrateHandEye method')
     parser.add_argument('--still-rad-s', type=float, default=0.01, help='max joint speed counted as still')
