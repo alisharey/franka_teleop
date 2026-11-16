@@ -2,7 +2,8 @@
 # recorder node. Edit and restart the launch; no rebuild needed.
 
 # Episodes are written here, one folder per episode.
-data_dir: ~/franka_teleop_data
+data_dir: data/teleop        # relative to the repository
+rollouts_dir: data/rollouts  # policy runs (record.sh --deploy), shown in the Rollouts tab
 
 # Web UI. 127.0.0.1 = this PC only; 0.0.0.0 also allows other machines on the network.
 http_host: 127.0.0.1

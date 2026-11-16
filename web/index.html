@@ -40,6 +40,8 @@
   .timer { font-variant-numeric: tabular-nums; font-size: 22px; font-weight: 650; }
   .timer.live { color: var(--rec); }
   .fields { display: grid; grid-template-columns: 2fr 1fr; gap: 10px; }
+  .taskpick { display: flex; gap: 6px; }
+  .taskpick select { flex: 1; min-width: 0; }
   label { font-size: 12px; color: var(--muted); display: grid; gap: 4px; }
   input[type=text] { width: 100%; padding: 7px 9px; border-radius: 7px; border: 1px solid var(--line);
                      background: var(--bg); color: var(--text); font: inherit; }
@@ -58,7 +60,8 @@
   td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
   .name { font-weight: 600; cursor: text; }
   .name:hover { text-decoration: underline dotted; }
-  .task { color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task { color: var(--muted); max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+  .task:hover { color: var(--text); text-decoration: underline dotted; }
   .btn { border: 1px solid var(--line); background: var(--panel); color: var(--text); padding: 5px 10px;
          border-radius: 7px; cursor: pointer; font: inherit; font-size: 13px; }
   .btn:hover { border-color: var(--muted); }
@@ -68,6 +71,13 @@
   .seg button { border: 0; background: transparent; color: var(--muted); padding: 4px 9px; cursor: pointer; font: inherit; }
   .seg button.on.s { background: var(--ok); color: #fff; }
   .seg button.on.f { background: var(--rec); color: #fff; }
+  .seg button.on.i { background: var(--warn); color: #fff; }
+  .seg button.on.x { background: var(--muted); color: var(--panel); }
+  .tabs { display: flex; gap: 4px; margin-bottom: 10px; border-bottom: 1px solid var(--line); }
+  .tabs button { border: 0; background: transparent; color: var(--muted); padding: 7px 12px; cursor: pointer;
+                 font: inherit; font-weight: 600; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+  .tabs .count { font-weight: 400; font-size: 12px; }
   .actions { display: flex; gap: 6px; justify-content: flex-end; }
   .status { font-size: 12px; color: var(--muted); }
   .status.warn { color: var(--warn); }
@@ -115,10 +125,11 @@
       <div><span class="timer" id="timer">00:00.0</span>
         <span class="status" id="rechint"></span></div>
       <div class="fields">
-        <label>Task instruction (saved with each new episode)
-          <input type="text" id="task" placeholder="e.g. pick up the red cube and put it in the bowl"></label>
+        <label>Task (saved with each new episode)
+          <span class="taskpick"><select id="task"></select>
+            <button type="button" class="btn" id="addtask">+ Add task</button></span></label>
         <label>Next episode name (optional)
-          <input type="text" id="nextname" placeholder="auto: episode_0001"></label>
+          <input type="text" id="nextname" placeholder="auto: task1_episode_001"></label>
       </div>
     </div>
   </section>
@@ -134,6 +145,7 @@
     </div>
     <div class="prow">
       <button class="btn" id="p-homebtn">Go home</button>
+      <button class="btn" id="p-gripper" title="Opens or closes the gripper (not during an episode)">Gripper</button>
       <button class="btn" id="p-preview" title="Runs the policy on the live cameras and shows its actions. Nothing is sent to the robot.">Preview (no motion)</button>
       <button class="btn primary" id="p-start">Run episode</button>
       <label class="check"><input type="checkbox" id="p-homefirst" checked> home first</label>
@@ -162,13 +174,23 @@
   </section>
 
   <section class="panel">
-    <h2>Episodes</h2>
-    <table>
+    <div class="tabs">
+      <button id="tab-recordings" class="on" onclick="showTab('recordings')">Recordings <span class="count" id="count-recordings"></span></button>
+      <button id="tab-rollouts" onclick="showTab('rollouts')">Rollouts <span class="count" id="count-rollouts"></span></button>
+    </div>
+    <table id="list-recordings">
       <thead><tr>
         <th>Name</th><th class="hide-sm">Task</th><th>Length</th><th class="hide-sm">Size</th>
         <th>Outcome</th><th></th>
       </tr></thead>
       <tbody id="episodes"></tbody>
+    </table>
+    <table id="list-rollouts" hidden>
+      <thead><tr>
+        <th>Run</th><th class="hide-sm">Task</th><th>Length</th><th class="hide-sm">Size</th>
+        <th>Outcome</th><th></th>
+      </tr></thead>
+      <tbody id="rollouts"></tbody>
     </table>
   </section>
 </main>
@@ -185,6 +207,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let status = null, episodesVersion = -1, camsBuilt = false, episodes = [];
+let rolloutsVersion = null, rollouts = [];
 
 function toast(message) {
   const t = $('toast'); t.textContent = message; t.style.display = 'block';
@@ -271,10 +294,76 @@ function renderStatus(s) {
   }
 
   if (s.episodes_version !== episodesVersion) { episodesVersion = s.episodes_version; loadEpisodes(); }
+  if (s.rollouts_version !== rolloutsVersion) { rolloutsVersion = s.rollouts_version; loadRollouts(); }
+}
+
+// ---- Rollouts tab: policy runs saved by record.sh --deploy (rollouts_dir), one folder per run.
+function showTab(name) {
+  for (const t of ['recordings', 'rollouts']) {
+    $('tab-' + t).classList.toggle('on', t === name);
+    $('list-' + t).hidden = t !== name;
+  }
+  try { localStorage.setItem('tab', name); } catch (e) {}
+}
+try { if (localStorage.getItem('tab') === 'rollouts') showTab('rollouts'); } catch (e) {}
+const OUTCOMES = [['success', 's', 'Success'], ['failure', 'f', 'Fail'], ['intervention', 'i', 'Intervened'], ['discard', 'x', 'Discard']];
+async function loadRollouts() {
+  try { rollouts = (await api('/api/rollouts')).rollouts; } catch (e) { return; }
+  const unlabelled = rollouts.filter((r) => !r.outcome).length;
+  $('count-rollouts').textContent = rollouts.length ? `(${rollouts.length}${unlabelled ? ', ' + unlabelled + ' unlabelled' : ''})` : '';
+  const body = $('rollouts');
+  if (!rollouts.length) { body.innerHTML = '<tr><td colspan="6" class="empty">No policy runs yet (record.sh --deploy).</td></tr>'; return; }
+  body.innerHTML = rollouts.map((r) => {
+    const when = r.id.slice(0, 4) + '-' + r.id.slice(4, 6) + '-' + r.id.slice(6, 8) + ' ' + r.id.slice(9, 11) + ':' + r.id.slice(11, 13) + ':' + r.id.slice(13, 15);
+    const length = r.duration_s != null ? fmtTime(r.duration_s) : (r.steps && r.rate_hz ? fmtTime(r.steps / r.rate_hz) : '–');
+    return `<tr>
+      <td><div class="name" style="cursor:default">${esc(r.checkpoint || r.id)}</div>
+          <div class="status">${when} · ${r.steps} steps · ${esc(r.ended || '')}</div></td>
+      <td class="task hide-sm" style="cursor:default" title="${esc(r.task)}">${esc(r.task)}</td>
+      <td class="num">${length}</td>
+      <td class="num hide-sm">${r.size_mb} MB</td>
+      <td><span class="seg">${OUTCOMES.map(([o, c, label]) =>
+        `<button class="${c} ${r.outcome === o ? 'on' : ''}" onclick="labelRollout('${esc(r.id)}', ${r.outcome === o ? 'null' : `'${o}'`})">${label}</button>`).join('')}
+      </span></td>
+      <td><div class="actions">
+        <button class="btn" ${r.has_replay ? '' : 'disabled'} title="${r.has_replay ? '' : 'not recorded'}" onclick="playRollout('${esc(r.id)}')">Replay</button>
+        <button class="btn danger" onclick="deleteRollout('${esc(r.id)}', this)">Delete</button>
+      </div></td></tr>`;
+  }).join('');
+}
+async function labelRollout(id, outcome) {
+  try { await api('/api/rollouts/' + encodeURIComponent(id), { outcome }); } catch (e) { toast(e.message); }
+  loadRollouts();
+}
+// two clicks instead of a browser dialog (which the browser can be told to block)
+function armed(button) {
+  if (button.dataset.armed) return true;
+  const label = button.textContent;
+  button.dataset.armed = '1'; button.textContent = 'Confirm delete?'; button.classList.add('stop');
+  setTimeout(() => { delete button.dataset.armed; button.textContent = label; button.classList.remove('stop'); }, 4000);
+  return false;
+}
+async function deleteRollout(id, button) {
+  if (!armed(button)) { toast('Click again to delete this run for good (data, label and recording; no undo).'); return; }
+  try { await api('/api/rollouts/' + encodeURIComponent(id) + '/delete', {}); toast('Deleted ' + id); } catch (e) { toast(e.message); }
+  loadRollouts();
+}
+function playRollout(id) {
+  const r = rollouts.find((x) => x.id === id);
+  const base = '/rollouts/' + encodeURIComponent(id) + '/';
+  $('player-title').textContent = (r.checkpoint || '') + ' · ' + id.slice(0, 15);
+  $('player-task').textContent = 'Task: ' + r.task + (r.outcome ? ' · ' + r.outcome : '');
+  $('player-files').innerHTML = ['rollout.json', 'recording/replay.mp4', 'recording/cam_1_color.mp4', 'recording/cam_2_color.mp4']
+    .map((f) => `<a href="${base}${f}" target="_blank">${esc(f)}</a>`).join('');
+  const video = $('player-video');
+  video.src = base + 'recording/replay.mp4';
+  $('player').showModal();
+  video.play().catch(() => {});
 }
 
 async function loadEpisodes() {
   try { episodes = (await api('/api/episodes')).episodes; } catch (e) { return; }
+  $('count-recordings').textContent = episodes.length ? `(${episodes.length})` : '';
   const body = $('episodes');
   if (!episodes.length) { body.innerHTML = '<tr><td colspan="6" class="empty">No episodes yet.</td></tr>'; return; }
   body.innerHTML = episodes.map((e) => {
@@ -284,7 +373,7 @@ async function loadEpisodes() {
     return `<tr data-id="${esc(e.id)}">
       <td><div class="name" title="Click to rename" onclick="renameEpisode('${esc(e.id)}')">${esc(e.name)}</div>
           <div class="status">${esc((e.created || '').replace('T', ' '))}${warn}</div>${state}</td>
-      <td class="task hide-sm" title="${esc(e.task)}">${esc(e.task) || '<span class="status">–</span>'}</td>
+      <td class="task hide-sm" title="${esc(e.task) || 'No task'} (click to change)" onclick="editTask('${esc(e.id)}')">${esc(e.task) || '<span class="status">–</span>'}</td>
       <td class="num">${e.duration_s != null ? fmtTime(e.duration_s) : '–'}</td>
       <td class="num hide-sm">${e.size_mb} MB</td>
       <td><span class="seg">
@@ -293,7 +382,7 @@ async function loadEpisodes() {
       </span></td>
       <td><div class="actions">
         <button class="btn" ${e.has_replay ? '' : 'disabled'} onclick="play('${esc(e.id)}')">Replay</button>
-        <button class="btn danger" ${busy ? 'disabled' : ''} onclick="trashEpisode('${esc(e.id)}')">Delete</button>
+        <button class="btn danger" ${busy ? 'disabled' : ''} onclick="trashEpisode('${esc(e.id)}', this)">Delete</button>
       </div></td></tr>`;
   }).join('');
 }
@@ -307,9 +396,39 @@ async function renameEpisode(id) {
   if (name === null || !name.trim()) return;
   try { await api('/api/episodes/' + encodeURIComponent(id), { name }); } catch (e) { toast(e.message); }
 }
-async function trashEpisode(id) {
+async function editTask(id) {
   const episode = episodes.find((e) => e.id === id);
-  if (!confirm(`Delete “${episode ? episode.name : id}”?\nIt is moved to the .trash folder inside the data folder.`)) return;
+  const tasks = status ? taskList(status.tasks) : [];
+  const listing = tasks.map(([text, n]) => n + ': ' + text).join('\n');
+  let task = prompt('Task of “' + (episode ? episode.name : id) + '”' + (listing ? ' (a number or new text)\n' + listing : ''),
+                    episode ? episode.task || '' : '');
+  if (task === null) return;
+  const picked = tasks.find(([, n]) => String(n) === task.trim());
+  if (picked) task = picked[0];
+  try { await api('/api/episodes/' + encodeURIComponent(id), { task: task.trim() }); } catch (e) { toast(e.message); }
+}
+const taskList = (tasks) => Object.entries(tasks || {}).sort((a, b) => a[1] - b[1]);
+let tasksShown = null;
+function renderTasks(s) {  // rebuilds the task menu when the list or the selection changed elsewhere
+  const key = JSON.stringify([s.tasks, s.task]);
+  if (key === tasksShown) return;
+  tasksShown = key;
+  const tasks = taskList(s.tasks);
+  if (s.task && !(s.task in (s.tasks || {}))) tasks.push([s.task, '?']);
+  $('task').innerHTML = '<option value="">– no task –</option>' +
+    tasks.map(([text, n]) => `<option value="${esc(text)}">task ${n}: ${esc(text)}</option>`).join('');
+  $('task').value = s.task;
+}
+$('addtask').addEventListener('click', async () => {
+  const task = prompt('New task instruction (e.g. pick up the red cube and put it in the bowl)');
+  if (task === null || !task.trim()) return;
+  try {
+    await api('/api/tasks', { task: task.trim() });
+    await api('/api/settings', { task: task.trim() });  // and record it next
+  } catch (e) { toast(e.message); }
+});
+async function trashEpisode(id, button) {
+  if (!armed(button)) { toast('Click again to delete it (moved to the .trash folder in the data folder).'); return; }
   try { await api('/api/episodes/' + encodeURIComponent(id) + '/trash', {}); } catch (e) { toast(e.message); }
 }
 function play(id) {
@@ -337,7 +456,7 @@ function pushSettings() {
   clearTimeout(settingsTimer);
   settingsTimer = setTimeout(() => api('/api/settings', { task: $('task').value, next_name: $('nextname').value }).catch((e) => toast(e.message)), 300);
 }
-$('task').addEventListener('input', pushSettings);
+$('task').addEventListener('change', () => api('/api/settings', { task: $('task').value }).catch((e) => toast(e.message)));
 $('nextname').addEventListener('input', pushSettings);
 
 // ---- Policy panel: talks to vla/baku/deploy.py (record.sh --deploy), shown only while it runs.
@@ -383,6 +502,10 @@ function renderPolicy(p) {
   $('p-load').disabled = p.state !== 'idle';
   $('p-task').disabled = p.state !== 'idle';
   $('p-homebtn').disabled = p.state !== 'idle' || p.no_motion || !p.home_saved;
+  const gripperOpen = r.connected && r.gripper_width > 0.07;
+  $('p-gripper').textContent = !r.connected ? 'Gripper' : gripperOpen ? 'Close gripper' : 'Open gripper';
+  $('p-gripper').dataset.open = gripperOpen ? '1' : '';
+  $('p-gripper').disabled = p.state !== 'idle' || p.no_motion || !r.connected;
   $('p-preview').disabled = !p.loaded || !(p.state === 'idle' || p.state === 'preview');
   $('p-preview').textContent = p.state === 'preview' ? 'Stop preview' : 'Preview (no motion)';
   $('p-start').disabled = !p.loaded || p.state !== 'idle' || p.no_motion;
@@ -420,6 +543,7 @@ async function pollPolicy() {
 $('p-load').addEventListener('click', () => policyCmd('/api/policy/load', { checkpoint: $('p-ckpt').value }));
 $('p-task').addEventListener('change', () => policyCmd('/api/policy/task', { index: Number($('p-task').value) }));
 $('p-homebtn').addEventListener('click', () => policyCmd('/api/policy/home'));
+$('p-gripper').addEventListener('click', () => policyCmd('/api/policy/gripper', { open: !$('p-gripper').dataset.open }));
 $('p-preview').addEventListener('click', () => policyCmd('/api/policy/preview', { on: !(policy && policy.state === 'preview') }));
 $('p-start').addEventListener('click', () => policyCmd('/api/policy/start', { home_first: $('p-homefirst').checked, record: $('p-record').checked }));
 $('p-stop').addEventListener('click', () => policyCmd('/api/policy/stop'));
@@ -428,8 +552,10 @@ pollPolicy();
 async function poll() {
   try {
     const s = await api('/api/status');
-    if (status === null) { $('task').value = s.task; $('nextname').value = s.next_name; }
+    if (status === null) $('nextname').value = s.next_name;
     else if (status.recording && !s.recording) { $('nextname').value = s.next_name; }
+    $('nextname').placeholder = 'auto: ' + s.default_name;
+    renderTasks(s);
     renderStatus(s);
   } catch (e) {
     chip('chip-teleop', 'Recorder <b>offline</b>', 'bad');

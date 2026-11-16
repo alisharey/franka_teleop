@@ -31,11 +31,39 @@ class EpisodeStoreTest(unittest.TestCase):
     def test_default_names_and_ids(self):
         now = datetime.datetime(2026, 9, 28, 14, 5, 9)
         first, path, meta = self.store.create('', 'pick cube', now=now)
-        self.assertEqual(first, '20260928_140509_episode_0001')
+        self.assertEqual(first, '20260928_140509_task1_episode_001')
         self.assertEqual(meta['task'], 'pick cube')
         self.assertEqual(meta['status'], 'recording')
-        second, _, _ = self.store.create('', '', now=now)
-        self.assertEqual(second, '20260928_140509_episode_0002')
+        self.assertEqual(self.store.create('', 'stack', now=now)[0], '20260928_140509_task2_episode_001')
+        self.assertEqual(self.store.default_name('pick cube'), 'task1_episode_002')
+        self.assertEqual(self.store.default_name('new task'), 'task3_episode_001')
+        self.assertEqual(self.store.tasks(), {'pick cube': 1, 'stack': 2})  # previews assign no number
+        self.assertEqual(self.store.create('', '', now=now)[0], '20260928_140509_episode_001')
+        # after a deletion the freed number is used again
+        self._finish(first)
+        self.store.move_to_trash(first)
+        self.assertEqual(self.store.default_name('pick cube'), 'task1_episode_001')
+        later, _, _ = self.store.create('', 'pick cube', now=now)
+        self._finish(later)
+        self.assertEqual(self.store.default_name('pick cube'), 'task1_episode_002')
+
+    def test_lost_task_list_is_rebuilt_from_the_episodes(self):
+        now = datetime.datetime(2026, 9, 28, 14, 5, 9)
+        for task in ('stack', 'slide', 'pick'):
+            self._finish(self.store.create('', task, now=now)[0])
+        (self.store.root / 'tasks.json').unlink()  # e.g. deleted with old data
+        self.assertEqual(self.store.add_task('pick'), 3)  # its episodes are task3_*
+        self.assertEqual(self.store.add_task('unstack'), 4)  # not 1 or 2: those are on disk
+        self.assertEqual(self.store.default_name('slide'), 'task2_episode_002')
+
+    def test_new_task_renumbers_default_names_only(self):
+        now = datetime.datetime(2026, 9, 28, 14, 5, 9)
+        auto, _, _ = self.store.create('', 'pick cube', now=now)
+        named, _, _ = self.store.create('my try', 'pick cube', now=now)
+        for episode_id in (auto, named):
+            self._finish(episode_id)
+        self.assertEqual(self.store.update(auto, task='stack'), '20260928_140509_task2_episode_001')
+        self.assertEqual(self.store.update(named, task='stack'), named)
 
     def test_rename_moves_folder_and_keeps_timestamp(self):
         episode_id, _, _ = self.store.create('first try', '', now=datetime.datetime(2026, 1, 2, 3, 4, 5))

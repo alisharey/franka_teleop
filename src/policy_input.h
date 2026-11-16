@@ -4,6 +4,7 @@
 // One datagram per policy step, 80 bytes, little-endian:
 //   char     magic[4]        "FPA1"
 //   uint32   flags           bit 0: enabled (apply the action; 0 = hold still)
+//                            bit 1: gripper command: apply action[6] even when not enabled
 //   uint64   sequence        increments per policy step
 //   uint64   home_requests   upper 32 bits: sender session (random per sender start);
 //                            lower 32 bits: count, +1 per request for the saved home pose
@@ -41,6 +42,7 @@ struct Packet {
   uint64_t sequence{};  // 0 = nothing received yet
   uint64_t home_requests{};
   bool enabled{};
+  bool gripper{};  // flags bit 1
   std::array<double, 7> action{};
   int64_t receive_steady_ns{};
   int64_t receive_ns{};  // system clock, for telemetry
@@ -70,6 +72,7 @@ inline bool parse(const unsigned char* data, size_t size, Packet& out) {
   std::memcpy(&out.home_requests, data + 16, 8);
   std::memcpy(out.action.data(), data + 24, 56);
   out.enabled = (flags & 1U) != 0;
+  out.gripper = (flags & 2U) != 0;
   for (const double value : out.action) {
     if (!std::isfinite(value)) {
       return false;

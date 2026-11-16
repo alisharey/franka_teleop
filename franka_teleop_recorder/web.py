@@ -6,10 +6,15 @@ Plain standard-library HTTP server (no extra Python packages). Endpoints:
   GET  /api/status                     recorder, cameras, teleop, disk
   POST /api/record  {"action": "start"|"stop"|"toggle"}
   POST /api/settings {"task": ..., "next_name": ...}
+  POST /api/tasks {"task": ...}         adds a task to the list (data_dir/tasks.json)
   GET  /api/episodes
   POST /api/episodes/<id>  {"name", "task", "notes", "success": true|false|null}
   POST /api/episodes/<id>/trash        moves the folder to <data_dir>/.trash
   GET  /episodes/<id>/<file>           episode files (replay.mp4 etc.), with Range support
+  GET  /api/rollouts                   policy runs (record.sh --deploy) in rollouts_dir
+  POST /api/rollouts/<id>  {"outcome": "success"|"failure"|"intervention"|"discard"|null}
+  POST /api/rollouts/<id>/delete       deletes the run folder for good
+  GET  /rollouts/<id>/<path>           run files (recording/replay.mp4 etc.)
 """
 
 import json
@@ -34,7 +39,7 @@ STREAM_PERIOD_S = 1.0 / 15.0
 _RANGE = re.compile(r'bytes=(\d*)-(\d*)$')
 
 
-def make_server(recorder, store, web_dir, host, port):
+def make_server(recorder, store, web_dir, host, port, rollouts=None):
     web_dir = Path(web_dir)
 
     class Handler(BaseHTTPRequestHandler):
@@ -133,9 +138,22 @@ def make_server(recorder, store, web_dir, host, port):
             if path in ('/', '/index.html'):
                 return self._file(web_dir / 'index.html')
             if path == '/api/status':
-                return self._json(recorder.status())
+                return self._json(dict(recorder.status(), rollouts_version=rollouts.version() if rollouts else None))
             if path == '/api/episodes':
                 return self._json({'episodes': store.list(), 'version': store.version})
+            if path == '/api/rollouts':
+                return self._json({'rollouts': rollouts.list() if rollouts else [],
+                                   'folder': str(rollouts.root) if rollouts else None})
+            if path.startswith('/rollouts/') and rollouts:
+                parts = path.strip('/').split('/')
+                try:
+                    folder = rollouts.path(parts[1]).resolve()
+                except (KeyError, IndexError):
+                    return self._error(HTTPStatus.NOT_FOUND, 'unknown rollout')
+                target = folder.joinpath(*parts[2:]).resolve()
+                if folder not in target.parents:
+                    return self._error(HTTPStatus.FORBIDDEN, 'forbidden')
+                return self._file(target)
             if path.startswith('/stream/'):
                 return self._stream(path[len('/stream/'):])
             parts = path.strip('/').split('/')
@@ -168,7 +186,28 @@ def make_server(recorder, store, web_dir, host, port):
                 if 'next_name' in body:
                     recorder.next_name = str(body['next_name']).strip()
                 return self._json({'ok': True})
+            if path == '/api/tasks':
+                try:
+                    return self._json({'ok': True, 'number': store.add_task(str(body.get('task', '')))})
+                except ValueError as exc:
+                    return self._error(HTTPStatus.BAD_REQUEST, str(exc))
             parts = path.strip('/').split('/')
+            if len(parts) == 4 and parts[:2] == ['api', 'rollouts'] and parts[3] == 'delete' and rollouts:
+                try:
+                    rollouts.delete(parts[2])
+                except KeyError:
+                    return self._error(HTTPStatus.NOT_FOUND, 'unknown rollout')
+                except RuntimeError as exc:
+                    return self._error(HTTPStatus.CONFLICT, str(exc))
+                return self._json({'ok': True})
+            if len(parts) == 3 and parts[:2] == ['api', 'rollouts'] and rollouts:
+                try:
+                    rollouts.label(parts[2], body.get('outcome'))
+                except KeyError:
+                    return self._error(HTTPStatus.NOT_FOUND, 'unknown rollout')
+                except ValueError as exc:
+                    return self._error(HTTPStatus.BAD_REQUEST, str(exc))
+                return self._json({'ok': True})
             if len(parts) in (3, 4) and parts[:2] == ['api', 'episodes']:
                 episode_id = parts[2]
                 try:

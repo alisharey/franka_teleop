@@ -29,12 +29,13 @@ Either way the gripper stays inside the workspace box and never moves against th
 ## Safety model
 
 - `controller_probe` is input-only and cannot connect to the robot.
-- The supplied configuration uses a fixed workspace box in the robot base frame (`workspace_*_m` in `config/teleop.conf`). The program refuses to start with the gripper outside it and slows motion near each wall so the arm stops about 2 cm inside the boundary, including any IK detour. Franka Desk's active collision settings are preserved.
+- The supplied configuration uses a fixed workspace box in the robot base frame (`workspace_*_m` in `config/teleop.conf`). The program refuses to start with the gripper outside it and slows motion near each wall so the arm stops about 2 cm inside the boundary, including any IK detour.
 - `gamepad_teleop --check-config` validates text configuration only and cannot connect to hardware.
 - Motion requires a valid configuration and `--enable-motion`. The program then connects to the robot at once and holds the arm; it moves only while the deadman (RB) is held.
-- Releasing the deadman pauses: the arm is brought smoothly to zero velocity and holds while the session stays open; pressing RB again resumes. Ctrl-C, joystick disconnect/read failure, missed input heartbeat, or loss of the gripper connection ends the arm-control loop at zero velocity. A single rejected or unsuccessful gripper command is reported and does not stop the arm. The program never retries after a stop; if the robot is still in reflex mode from a previous stop, it runs libfranka's error recovery once at the next startup. Joint velocities stay inside the robot's own position-dependent limits (evaluated 0.05 rad early), so joints come to rest before their limits; on a libfranka control error the program prints the joint positions against the FR3 limits.
+- Releasing the deadman pauses: the arm is brought smoothly to zero velocity and holds while the session stays open; pressing RB again resumes. Ctrl-C, joystick disconnect/read failure, missed input heartbeat, or loss of the gripper connection ends the arm-control loop at zero velocity. A single rejected or unsuccessful gripper command is reported and does not stop the arm. If the robot is still in reflex mode from a previous stop, the program runs libfranka's error recovery once at startup. Joint velocities stay inside the robot's own position-dependent limits (evaluated 0.05 rad early), so joints come to rest before their limits; on a libfranka control error the program prints the joint positions against the FR3 limits.
+- Collisions: at startup the program sets the robot's collision thresholds from `config/teleop.conf` (`collision_force_N`, `collision_moment_Nm`, `collision_joint_torque_Nm`; defaults: the robot stops above 50 N / 30 Nm at the gripper and 50 Nm (joints 1-4) / 25 Nm (joints 5-7) at the joints), replacing those Franka Desk or the last program set. Below that, motion further into a contact stops above `contact_force_limit_N` (15 N) at the gripper and backs off. After a contact reflex (`reflex_recovery = true`) it recovers and keeps the session, holding still until the deadman is released and pressed again; more than 3 reflexes within 60 s, or any other control error, end it.
 - Stick commands are Cartesian velocities in Franka's base frame `O` (m/s and rad/s); the workspace is a fixed translation box in that frame.
-- Motion is shaped twice (Cartesian and joint S-curves) and clipped by libfranka's joint rate limiter; each session begins with a 0.1 s zero-velocity hold. The project does not change impedance gains or attempt to bypass robot collision/reflex behaviour.
+- Motion is shaped twice (Cartesian and joint S-curves) and clipped by libfranka's joint rate limiter; each session begins with a 0.1 s zero-velocity hold. The project does not change impedance gains.
 
 Do not operate until the workcell is clear, the emergency stop is accessible, FCI is enabled, the operator has approved the configuration, and no other client controls the robot or parallel gripper.
 
@@ -95,7 +96,7 @@ cp config/teleop.conf.example config/teleop.conf
 ros2 run franka_teleop gamepad_teleop --config config/teleop.conf --check-config
 ```
 
-The supplied `config/teleop.conf` uses `0.15 m/s` and `0.40 rad/s` top speeds, `1.0 m/s²` / `10 m/s³` linear and `2.5 rad/s²` / `25 rad/s³` angular S-curve limits, a `0.1 s` zero-velocity startup hold, the lab's fixed workspace box, and the parallel-gripper settings (open `0.08 m/s`, grasp `0.03 m/s` at `50 N`). Speeds and gripper settings were originally taken from Frankastein's keyboard teleop. It preserves the currently configured Franka Desk collision behavior.
+The supplied `config/teleop.conf` uses `0.15 m/s` and `0.40 rad/s` top speeds, `1.0 m/s²` / `10 m/s³` linear and `2.5 rad/s²` / `25 rad/s³` angular S-curve limits, a `0.1 s` zero-velocity startup hold, the lab's fixed workspace box, and the parallel-gripper settings (open `0.08 m/s`, grasp `0.03 m/s` at `50 N`), and the collision thresholds above. Speeds and gripper settings were originally taken from Frankastein's keyboard teleop.
 
 Stick directions are in the robot base frame `O`; a controlled, clear-workspace check is still required before physical use because the operator's view may not be aligned with that frame.
 
@@ -144,9 +145,9 @@ The joint-velocity IK version has been tested in simulation only; the first run 
 
 This starts both cameras and the recorder in the background (log in `log/`), opens the web UI at <http://localhost:8765>, and runs `gamepad_teleop` in the foreground. Ctrl-C ends only the teleop; you can then restart it or quit, and quitting saves a running episode first. `--no-teleop` runs cameras and recorder only, `--no-browser` skips opening the page. The pieces can also be run by hand: `ros2 launch franka_teleop recording.launch.py` and `ros2 run franka_teleop gamepad_teleop --config config/teleop.conf --enable-motion`.
 
-The page shows both live camera views, the robot state, and the saved episodes. Type the task instruction once (it is stored with every new episode), then press **Y** on the gamepad, or **Record** on the page, to start; press it again to stop and save. Episodes can be renamed (click the name), marked success/fail, replayed as a side-by-side video of both cameras, or deleted (moved to `.trash` in the data folder). Stopping the launch with Ctrl-C saves a running episode first.
+The page shows both live camera views, the robot state, and the saved episodes. Pick the task from the menu (**+ Add task** adds a new one; the task is stored with every new episode), then press **Y** on the gamepad, or **Record** on the page, to start; press it again to stop and save. Episodes can be renamed (click the name), marked success/fail, replayed as a side-by-side video of both cameras, or deleted (moved to `.trash` in the data folder). The **Rollouts** tab lists the policy runs of `record.sh --deploy` (`data/rollouts`): label each one (success, fail, intervened, discard) and replay its recording. Stopping the launch with Ctrl-C saves a running episode first.
 
-Setup lives in `config/recording.yaml`: data folder (default `~/franka_teleop_data`), web port, record button, camera names and serial numbers (rename `cam_1`/`cam_2` to where they are mounted), resolution (640×480 at 30 fps), depth and IMU on/off (IMU is off by default), and a hardware reset of the cameras at startup, which clears a stream that stopped delivering frames.
+Setup lives in `config/recording.yaml`: data folder (default `data/teleop`, relative to the repository), web port, record button, camera names and serial numbers (rename `cam_1`/`cam_2` to where they are mounted), resolution (640×480 at 30 fps), depth and IMU on/off (IMU is off by default), and a hardware reset of the cameras at startup, which clears a stream that stopped delivering frames.
 
 **What is published.** `gamepad_teleop` publishes, from a normal-priority thread fed by a lock-free buffer (the 1 kHz loop never waits on ROS):
 
@@ -156,7 +157,7 @@ Setup lives in `config/recording.yaml`: data folder (default `~/franka_teleop_da
 
 The RealSense driver publishes each camera under `/cameras/<name>/` (color, depth aligned to color, camera_info, IMU, TF).
 
-**What is saved,** one folder per episode (`<date>_<time>_<name>`):
+**What is saved,** one folder per episode (`<date>_<time>_<name>`). Without a typed name an episode is called `task<N>_episode_<k>`: N numbers the tasks in the order they were first recorded (kept in `tasks.json` in the data folder), k counts up per task. Changing the task of such an episode renumbers it into the new task.
 
 | File | Contents |
 |---|---|
@@ -196,9 +197,9 @@ The teleop reads the Quest's right controller itself (no separate bridge), like 
 ## Replaying an episode on the robot
 
 ```bash
-./replay.sh episode_0002                          # accumulate mode, recorded speed
-./replay.sh episode_0002 --mode from-current      # apply each action to the measured pose
-./replay.sh episode_0002 --speed 0.5 --no-gripper
+./replay.sh task1_episode_002                          # accumulate mode, recorded speed
+./replay.sh task1_episode_002 --mode from-current      # apply each action to the measured pose
+./replay.sh task1_episode_002 --speed 0.5 --no-gripper
 ```
 
 `scripts/episode_actions` turns the episode's 1 kHz state into delta end-effector pose actions at `--rate` Hz (default 15): per step, the gripper's position change and rotation change (rotation vector) in the base frame, plus open/closed. These are the actions a VLA would be trained on. `episode_replay` (independent of `gamepad_teleop`) then:

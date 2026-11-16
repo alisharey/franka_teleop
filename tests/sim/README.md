@@ -39,7 +39,7 @@ nothing reaches a running robot stack:
 
 ```bash
 source /opt/ros/humble/setup.bash && source install/setup.bash && export ROS_DOMAIN_ID=77
-python3 tests/sim/fake_cameras.py ~/franka_teleop_data/<episode> --depth --state &
+python3 tests/sim/fake_cameras.py data/teleop/<episode> --depth --state &
 vla/baku/deploy.sh --no-motion --record "" --http-port 8799
 curl -XPOST localhost:8799/api/policy/load -d '{"checkpoint": "'$PWD'/vla/baku/runs/<run>/snapshot/<step>.pt"}'
 curl -XPOST localhost:8799/api/policy/preview -d '{"on": true}'; curl localhost:8799/api/policy/status

@@ -54,6 +54,8 @@ def _nodes(context):
                 'publish_tf': True,
             }],
         ))
+    if LaunchConfiguration('recorder').perform(context).lower() in ('false', '0', 'no'):
+        return nodes  # cameras only (tools/click_to_move)
     nodes.append(Node(
         package='franka_teleop',
         executable='recorder',
@@ -74,5 +76,6 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('config', default_value=default_config,
                               description='Recording config (cameras, data folder, web port)'),
+        DeclareLaunchArgument('recorder', default_value='true', description='false: the cameras only'),
         OpaqueFunction(function=_nodes),
     ])

@@ -33,15 +33,17 @@ HTTP API (127.0.0.1:<port>, JSON):
 Per rollout: <out>/<id>/rollout.npz + rollout.json (actions sent and raw, the
 policy's input images, VQ-BeT entropies/probabilities, full code distributions,
 picked codes, predicted action chunk, action-token feature, timing), with
-"record" a recorder episode (cameras + robot bag), and with --safe-export the
-failure-detection files task<T>--ep<E>--succ<0|1>.{csv,pkl,meta.json}.
+"record" the recorder episode (cameras + robot bag), moved into <out>/<id>/recording
+once it is written. The label is written into rollout.json; vla/baku/upload_rollouts.sh converts the labelled runs into the
+Failure_Detection format and uploads them to the HPC.
 """
 
 import argparse
 import json
 import math
-import pickle
+import os
 import random
+import shutil
 import signal
 import socket
 import struct
@@ -64,7 +66,6 @@ ROOT = HERE.parents[1]
 sys.path.insert(0, str(HERE.parent / 'BAKU' / 'baku'))
 
 PACKET = struct.Struct('<4sIQQ7d')  # src/policy_input.h
-ACTION_NAMES = ['dx', 'dy', 'dz', 'droll', 'dpitch', 'dyaw', 'dgripper']
 HOME_TOLERANCE_RAD = 0.01
 HOME_TIMEOUT_S = 40.0
 STATE_SAMPLE_S = 0.01      # /teleop/state (1 kHz) decoded at most every 10 ms (status)
@@ -158,9 +159,10 @@ class Link:
         self.session = random.getrandbits(32) | 1
         self.home_requests = 0
 
-    def send(self, action, enabled):
+    def send(self, action, enabled, gripper=False):
+        """gripper: also apply action[6] while not enabled (src/policy_input.h flags bit 1)."""
         self.sequence += 1
-        self.socket.sendto(PACKET.pack(b'FPA1', 1 if enabled else 0, self.sequence,
+        self.socket.sendto(PACKET.pack(b'FPA1', (1 if enabled else 0) | (2 if gripper else 0), self.sequence,
                                        (self.session << 32) | (self.home_requests & 0xFFFFFFFF),
                                        *[float(v) for v in action]), self.address)
 
@@ -189,9 +191,6 @@ class Recorder:
 
     def stop(self):
         return self._post('/api/record', {'action': 'stop'}).get('id')
-
-    def label(self, episode_id, success, notes):
-        return self._post('/api/episodes/%s' % episode_id, {'success': success, 'notes': notes})
 
 
 def checkpoint_label(path):
@@ -344,6 +343,19 @@ class Server:
                 raise RuntimeError('no home_joints in %s (tools/save_home_pose.sh)' % self.args.teleop_config)
             self._set('homing', 'Moving to the home pose ...')
         self._start_worker(self._home_then, None)
+
+    def gripper(self, open_):
+        """Opens or closes the gripper while no episode runs; the arm holds still."""
+        with self.lock:
+            if self.args.no_motion:
+                raise RuntimeError('--no-motion: the gripper is disabled')
+            self._require('idle')
+            action = np.zeros(7)
+            action[6] = 1.0 if open_ else 0.0
+            for _ in range(3):
+                self.link.send(action, False, gripper=True)
+                time.sleep(0.02)
+            self.message = 'Gripper %s.' % ('opening' if open_ else 'closing')
 
     def _home(self):
         for _ in range(3):  # announce this sender's session first, so the request below counts
@@ -516,7 +528,9 @@ class Server:
         run = self.save(log, reason)
         with self.lock:
             self.last_run = run
-        self._set('idle', 'Episode ended (%s) after %d steps; saved %s. Label it below (optional).' % (
+        if run['record_episode']:
+            threading.Thread(target=self._collect_recording, args=(run,), daemon=True).start()
+        self._set('idle', 'Episode ended (%s) after %d steps; saved %s. Label it below (needed for the failure-detection data).' % (
             reason, run['steps'], run['id']))
 
     def save(self, log, reason):
@@ -532,15 +546,43 @@ class Server:
                 'rate_hz': self.policy.rate_hz, 'steps': steps, 'late_ticks': log['late_ticks'], 'ended': reason,
                 'outcome': None, 'recorder_episode': self.record_episode,
                 'clip': {'position_m': self.args.max_position_m, 'rotation_rad': self.args.max_rotation_rad},
+                'robot_id': self.args.robot_id, 'camera_calibration_version': self.args.camera_calibration,
+                'demo_dataset': {'path': self.policy.info['dataset']['path'],
+                                 'episodes': self.policy.info['dataset']['episode_ids']},
                 'arrays': {k: list(np.shape(v)) for k, v in arrays.items()}}
         (folder / 'rollout.json').write_text(json.dumps(info, indent=1))
         return {'id': log['id'], 'folder': folder, 'info': info, 'log': log, 'steps': steps, 'reason': reason,
-                'outcome': None, 'record_episode': self.record_episode, 'export': None,
+                'outcome': None, 'record_episode': self.record_episode,
                 'task_index': self.policy.task_index}
 
+    def _collect_recording(self, run):
+        """Moves the run's recorder episode (cameras + robot bag) into <run>/recording once the recorder has
+        finished writing it, so each policy run is one folder and the demo episodes list stays clean."""
+        source = Path(self.args.recordings_dir).expanduser() / run['record_episode']
+        for _ in range(600):  # the recorder encodes the videos after stopping
+            try:
+                if json.loads((source / 'meta.json').read_text()).get('status') not in ('recording', 'processing'):
+                    break
+            except (OSError, ValueError):
+                pass
+            time.sleep(1.0)
+        else:
+            print('recording %s not finished after 10 min; left in %s' % (run['record_episode'], source), flush=True)
+            return
+        if not (run['folder'] / 'rollout.json').is_file():  # the run was deleted on the Rollouts tab meanwhile
+            print('run %s was deleted; its recording is left in %s' % (run['folder'].name, source), flush=True)
+            return
+        try:
+            shutil.move(str(source), str(run['folder'] / 'recording'))
+        except OSError as error:
+            print('could not move recording %s: %s' % (source, error), flush=True)
+            return
+        with self.lock:
+            run['info']['recording'] = 'recording'
+            update_info(run['folder'], recording='recording')
+
     def label(self, outcome):
-        """Sets (or changes) the outcome of the last episode: rollout.json, the recorder
-        episode's success flag and, with --safe-export, the failure-detection files."""
+        """Sets (or changes) the outcome of the last episode (in its rollout.json)."""
         outcome = {'s': 'success', 'f': 'failure', 'i': 'intervention', 'x': 'discard'}.get(outcome, outcome)
         if outcome not in ('success', 'failure', 'intervention', 'discard'):
             raise RuntimeError('outcome must be success, failure, intervention or discard')
@@ -550,64 +592,18 @@ class Server:
                 raise RuntimeError('no episode to label yet')
             run['outcome'] = outcome
             run['info']['outcome'] = outcome
-            (run['folder'] / 'rollout.json').write_text(json.dumps(run['info'], indent=1))
-            success = outcome == 'success'
-            notes = 'BAKU policy rollout: %s, task %d, %s' % (run['log']['checkpoint']['path'], run['task_index'],
-                                                             outcome)
-            if run['export']:  # relabelled: replace the earlier export
-                for path in run['export']:
-                    Path(path).unlink(missing_ok=True)
-                run['export'] = None
-            if self.args.safe_export and outcome != 'discard' and run['steps']:
-                stem = write_safe_export(Path(self.args.safe_export), run['log'], self.policy, self.args, success,
-                                         outcome == 'intervention', notes, run['task_index'])
-                run['export'] = [str(stem) + ext for ext in ('.csv', '.pkl', '.meta.json')]
+            update_info(run['folder'], outcome=outcome)
             self.message = 'Last episode %s: %s.' % (run['id'], outcome)
-        if run['record_episode']:
-            episode, value = run['record_episode'], None if outcome == 'discard' else success
-
-            def label_when_saved():  # the recorder refuses edits while it still writes the episode
-                for _ in range(60):
-                    try:
-                        self.recorder.label(episode, value, notes)
-                        return
-                    except OSError:
-                        time.sleep(1.0)
-                print('recorder: could not label episode %s' % episode, flush=True)
-            threading.Thread(target=label_when_saved, daemon=True).start()
 
 
-def write_safe_export(folder, log, policy, args, success, intervention, notes, task_id):
-    """interpretability/monitor.py's per-rollout files for Failure_Detection."""
-    import torch
-    folder.mkdir(parents=True, exist_ok=True)
-    used = [int(p.name.split('--ep')[1].split('--')[0]) for p in folder.glob('task%d--ep*--succ*.csv' % task_id)]
-    episode = max(used) + 1 if used else 0
-    stem = folder / ('task%d--ep%d--succ%d' % (task_id, episode, 1 if success else 0))
-    header = ['action/%s' % n for n in ACTION_NAMES] + ['action/token_%d_entropy' % i for i in range(7)] + \
-             ['action/token_%d_prob' % i for i in range(7)]
-    with open(str(stem) + '.csv', 'w') as f:
-        f.write(','.join(header) + '\n')
-        for action, entropy, prob in zip(log['action'], log['token_entropy'], log['token_prob']):
-            f.write(','.join('%.9g' % v for v in [*action, *entropy, *prob]) + '\n')
-    with open(str(stem) + '.pkl', 'wb') as f:
-        pickle.dump({'hidden_states': torch.tensor(np.array(log['feature']), dtype=torch.float32).unsqueeze(1),
-                     'task_suite_name': args.suite_name, 'task_id': task_id, 'task_description': policy.task_text,
-                     'episode_idx': episode, 'episode_success': 1 if success else 0}, f)
-    meta = {'policy': 'baku', 'suite': args.suite_name, 'kind': 'natural', 'task_id': task_id,
-            'episode_idx': episode, 'success': 1 if success else 0, 'checkpoint': policy.snapshot,
-            'demo_dataset_version': {'path': policy.info['dataset']['path'],
-                                     'episodes': policy.info['dataset']['episode_ids']},
-            'robot_id': args.robot_id, 'control_hz': policy.rate_hz,
-            'camera_calibration_version': args.camera_calibration,
-            'action_filter': 'deploy clip |pos| <= %g m, |rot| <= %g rad; gamepad_teleop input=policy: target '
-                             'tracking (quest gains), speed caps, workspace fence, IK' % (args.max_position_m,
-                                                                                          args.max_rotation_rad),
-            'executed_action': 'the CSV holds the actions sent (after the clip); the robot tracked them through '
-                               'the teleop controller (recorded in the bag when the episode was recorded)',
-            'intervention': bool(intervention), 'notes': notes, 'task_description': policy.task_text}
-    Path(str(stem) + '.meta.json').write_text(json.dumps(meta, indent=2, sort_keys=True) + '\n')
-    return stem
+def update_info(folder, **fields):
+    """Changes fields of a run's rollout.json, keeping the rest (the recorder's Rollouts tab also labels runs)."""
+    path = Path(folder) / 'rollout.json'
+    info = json.loads(path.read_text())
+    info.update(fields)
+    temporary = path.with_suffix('.json.tmp')
+    temporary.write_text(json.dumps(info, indent=1))
+    os.replace(temporary, path)
 
 
 def gpu_free_mb():
@@ -654,6 +650,8 @@ def make_http(server, port):
                     server.load(body['checkpoint'])
                 elif route == '/api/policy/home':
                     server.home()
+                elif route == '/api/policy/gripper':
+                    server.gripper(bool(body.get('open', True)))
                 elif route == '/api/policy/preview':
                     server.preview(bool(body.get('on', True)))
                 elif route == '/api/policy/start':
@@ -685,15 +683,19 @@ def main():
     parser.add_argument('--max-position-m', type=float, default=0.05, help='clip of the position action')
     parser.add_argument('--max-rotation-rad', type=float, default=0.3, help='clip of the rotation action')
     parser.add_argument('--camera-timeout-s', type=float, default=0.25)
-    parser.add_argument('--out', default=str(Path.home() / 'franka_policy_rollouts'))
+    parser.add_argument('--out', default='data/rollouts', help='one folder per run (relative: to the repository)')
     parser.add_argument('--record', default='http://localhost:8765', metavar='URL',
                         help='recorder web UI used to record episodes ("" = none)')
-    parser.add_argument('--safe-export', default=None, metavar='DIR', help='write failure-detection files here')
-    parser.add_argument('--suite-name', default='real_franka_v1')
     parser.add_argument('--robot-id', default='franka_fr3')
     parser.add_argument('--camera-calibration', default='unversioned')
+    parser.add_argument('--recordings-dir', default='data/teleop',
+                        help="the recorder's data_dir (config/recording.yaml): each run's recording is moved from "
+                             "there into <out>/<run>/recording")
     parser.add_argument('--device', default='cuda')
     args = parser.parse_args()
+    for name in ('out', 'recordings_dir'):  # relative paths are relative to the repository
+        value = Path(getattr(args, name)).expanduser()
+        setattr(args, name, str(value if value.is_absolute() else ROOT / value))
 
     def interrupt(signum, frame):
         raise KeyboardInterrupt

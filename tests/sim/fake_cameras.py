@@ -3,7 +3,7 @@
 (/cameras/<cam>/color/image_raw, rgb8, 30 Hz, looping), for dry runs of the
 policy server without the RealSense cameras.
 
-    python3 tests/sim/fake_cameras.py ~/franka_teleop_data/<episode> [--depth] [--state]
+    python3 tests/sim/fake_cameras.py data/teleop/<episode> [--depth] [--state]
 
 --depth  also the aligned depth (/cameras/<cam>/aligned_depth_to_color/image_raw,
          16UC1 mm, same stamp as the color frame), from the recorded depth videos

@@ -6,7 +6,7 @@
 #
 #   ./replay.sh EPISODE [--mode accumulate|from-current] [--rate HZ] [--speed F] [--no-gripper]
 #
-# EPISODE: an episode folder, its folder name, or its name (e.g. episode_0002).
+# EPISODE: an episode folder, its folder name, or its name (e.g. task1_episode_002).
 # --mode accumulate    (default) each target = previous target + action
 # --mode from-current  each action is added to where the arm actually is (like a policy)
 # --rate               action rate in Hz (default 15)

@@ -43,8 +43,20 @@ speed_toggle_axis = 7
 # stops. Either way the gripper never leaves the workspace box.
 allow_detour = true
 
-# This tool deliberately preserves Franka Desk's active collision behavior; it
-# never raises or lowers those thresholds.
+# Contact: above contact_force_limit_N at the gripper (the robot's force estimate),
+# motion further into the contact stops and backs off at contact_backoff_m_s_per_N
+# per newton above it (0 = off).
+contact_force_limit_N = 15.0
+contact_backoff_m_s_per_N = 0.002
+# The robot's collision thresholds, set at startup (replacing Franka Desk's):
+# "contact, stop" at the gripper (force x/y/z, moment), and the stop torque per joint
+# (its contact flag at min(20 Nm, that value)).
+collision_force_N = 20.0, 50.0
+collision_moment_Nm = 20.0, 30.0
+collision_joint_torque_Nm = 50.0, 50.0, 50.0, 50.0, 25.0, 25.0, 25.0
+# After a contact reflex: recover and keep running, holding still until the deadman
+# is released and pressed again; more than 3 reflexes within 60 s end the session.
+reflex_recovery = true
 
 # Releasing the deadman pauses arm motion; a joystick fault ends it. These gripper
 # values match Frankastein's keyboard teleop.

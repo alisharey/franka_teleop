@@ -179,6 +179,20 @@ struct Config {
   std::string policy_host{"127.0.0.1"};
   int policy_port{47820};
   int policy_timeout_ms{300};  // no action for this long pauses the arm
+  // Contact: the robot's force estimate at the gripper (O_F_ext_hat_K: the force the gripper
+  // pushes with). Above contact_force_limit_N the commanded motion stops going further into
+  // the contact and backs off at contact_backoff_m_s_per_N per newton above it (0 = off).
+  double contact_force_limit_N{15.0};
+  double contact_backoff_m_s_per_N{0.002};
+  // The robot's collision thresholds, set at startup: contact flag above the first value,
+  // reflex (the robot stops) above the second. Joint torques: the reflex value per joint;
+  // its contact flag at min(20 Nm, that value).
+  std::array<double, 2> collision_force_N{20.0, 50.0};    // gripper x, y, z
+  std::array<double, 2> collision_moment_Nm{20.0, 30.0};  // gripper roll, pitch, yaw
+  std::array<double, 7> collision_joint_torque_Nm{50.0, 50.0, 50.0, 50.0, 25.0, 25.0, 25.0};
+  // After a reflex: recover and keep running, holding still until the deadman (grip, RB, the
+  // policy's 'enabled') is released and pressed again; gives up after 3 reflexes within 60 s.
+  bool reflex_recovery{true};
 };
 
 [[nodiscard]] std::unordered_map<std::string, std::string> read_key_values(const std::string& path) {
@@ -186,7 +200,7 @@ struct Config {
   if (!stream) {
     throw std::runtime_error("cannot open config '" + path + "'");
   }
-  const std::array<std::string, 39> allowed_keys{
+  const std::array<std::string, 45> allowed_keys{
       "robot_ip", "joystick_path", "controller_profile", "deadzone", "max_linear_speed_m_s",
       "max_angular_speed_rad_s", "max_linear_acceleration_m_s2", "max_linear_jerk_m_s3",
       "max_angular_acceleration_rad_s2", "max_angular_jerk_rad_s3", "initial_zero_hold_s",
@@ -196,7 +210,8 @@ struct Config {
       "gripper_grasp_force_N", "gripper_grasp_epsilon_inner_m", "gripper_grasp_epsilon_outer_m",
       "input", "quest_connection", "quest_position_gain", "quest_rotation_gain", "quest_axis_reorder",
       "quest_position_scale", "quest_level_frame", "quest_timeout_ms", "home_joints", "quest_rotation_scale",
-      "policy_host", "policy_port", "policy_timeout_ms"};
+      "policy_host", "policy_port", "policy_timeout_ms", "contact_force_limit_N", "contact_backoff_m_s_per_N",
+      "collision_force_N", "collision_moment_Nm", "collision_joint_torque_Nm", "reflex_recovery"};
   std::unordered_map<std::string, std::string> values;
   std::string line;
   size_t line_number = 0;
@@ -342,6 +357,21 @@ void validate_input(const Config& config) {
   if (const auto* value = optional("quest_axis_reorder")) {
     const auto reorder = parse_array<4>("quest_axis_reorder", *value);
     for (size_t index = 0; index < 4; ++index) config.quest_axis_reorder[index] = static_cast<int>(reorder[index]);
+  }
+  if (const auto* value = optional("contact_force_limit_N")) config.contact_force_limit_N = parse_double("contact_force_limit_N", *value);
+  if (const auto* value = optional("contact_backoff_m_s_per_N")) config.contact_backoff_m_s_per_N = parse_double("contact_backoff_m_s_per_N", *value);
+  if (const auto* value = optional("collision_force_N")) config.collision_force_N = parse_array<2>("collision_force_N", *value);
+  if (const auto* value = optional("collision_moment_Nm")) config.collision_moment_Nm = parse_array<2>("collision_moment_Nm", *value);
+  if (const auto* value = optional("collision_joint_torque_Nm")) config.collision_joint_torque_Nm = parse_array<7>("collision_joint_torque_Nm", *value);
+  if (const auto* value = optional("reflex_recovery")) config.reflex_recovery = parse_boolean("reflex_recovery", *value);
+  if (config.contact_force_limit_N < 0.0 || config.contact_backoff_m_s_per_N < 0.0 ||
+      config.collision_force_N[0] <= 0.0 || config.collision_force_N[1] < config.collision_force_N[0] ||
+      config.collision_moment_Nm[0] <= 0.0 || config.collision_moment_Nm[1] < config.collision_moment_Nm[0] ||
+      *std::min_element(config.collision_joint_torque_Nm.begin(), config.collision_joint_torque_Nm.end()) <= 0.0) {
+    throw std::runtime_error("contact limits must be >= 0; collision thresholds positive, as 'contact, stop' with stop >= contact");
+  }
+  if (config.contact_force_limit_N > 0.0 && config.contact_force_limit_N >= config.collision_force_N[1]) {
+    throw std::runtime_error("contact_force_limit_N must be below the collision_force_N stop value");
   }
   validate_input(config);
   return config;
@@ -778,8 +808,9 @@ class PolicyTeleopInput final : public TeleopInput {
       target_rotation_ = telemoma::multiply(telemoma::from_euler_xyz({a[3], a[4], a[5]}), robot_rotation_);
       has_target_ = true;
       // Gripper target (1 open, 0 closed) with hysteresis: temporal aggregation
-      // averages it, so it passes 0.5 gradually.
-      if (packet_.enabled) {
+      // averages it, so it passes 0.5 gradually. A gripper command (the web page's
+      // button) applies while the arm holds still too.
+      if (packet_.enabled || packet_.gripper) {
         const int current = gripper_action_.load();
         const int wanted = a[6] >= 0.65 ? 1 : a[6] <= 0.35 ? 2 : current;
         if (wanted != 0 && wanted != current) {
@@ -962,6 +993,32 @@ constexpr double kBrakingAccelerationFraction = 0.5;
   const double acceleration = max_acceleration * kBrakingAccelerationFraction;
   const double ramp_s = acceleration / jerk;
   return acceleration * (-ramp_s + std::sqrt(ramp_s * ramp_s + 2.0 * usable_m / acceleration));
+}
+
+// Contact: O_F_ext_hat_K points the way the gripper pushes (pressing down reads -z; checked on
+// the recordings: stalled against an object, force and commanded motion agree in 98 % of ticks).
+// Above contact_force_limit_N the linear twist may not go further along that direction and backs
+// off in proportion to the excess, so contact settles near the limit instead of growing to a
+// reflex. Motion sideways or away from the contact is untouched.
+void limit_contact(std::array<double, 6>& twist, const franka::RobotState& state, const Config& config) {
+  if (config.contact_force_limit_N <= 0.0) {
+    return;
+  }
+  const double fx = state.O_F_ext_hat_K[0];
+  const double fy = state.O_F_ext_hat_K[1];
+  const double fz = state.O_F_ext_hat_K[2];
+  const double force = std::hypot(fx, fy, fz);
+  if (force <= config.contact_force_limit_N) {
+    return;
+  }
+  const std::array<double, 3> push{fx / force, fy / force, fz / force};
+  const double into = twist[0] * push[0] + twist[1] * push[1] + twist[2] * push[2];
+  const double allowed = -config.contact_backoff_m_s_per_N * (force - config.contact_force_limit_N);
+  if (into > allowed) {
+    for (size_t axis = 0; axis < 3; ++axis) {
+      twist[axis] += (allowed - into) * push[axis];
+    }
+  }
 }
 
 [[nodiscard]] std::array<double, 6> bounded_velocity(const franka::RobotState& state,
@@ -1338,6 +1395,23 @@ int main(int argc, char** argv) {
       robot.automaticErrorRecovery();
       initial_state = robot.readOnce();
     }
+    {
+      // The robot keeps whatever collision thresholds the last program set; use ours.
+      std::array<double, 7> torque_contact{};
+      for (size_t joint = 0; joint < 7; ++joint) {
+        torque_contact[joint] = std::min(20.0, config.collision_joint_torque_Nm[joint]);
+      }
+      const auto& force = config.collision_force_N;
+      const auto& moment = config.collision_moment_Nm;
+      robot.setCollisionBehavior(torque_contact, config.collision_joint_torque_Nm,
+                                 {force[0], force[0], force[0], moment[0], moment[0], moment[0]},
+                                 {force[1], force[1], force[1], moment[1], moment[1], moment[1]});
+      std::cout << "Collision thresholds: the robot stops above " << force[1] << " N / " << moment[1]
+                << " Nm at the gripper and joint torques " << config.collision_joint_torque_Nm[0] << ".."
+                << config.collision_joint_torque_Nm[6] << " Nm; contact limit " << config.contact_force_limit_N
+                << " N (" << (config.contact_force_limit_N > 0.0 ? "motion into contact stops there" : "off")
+                << "); reflex recovery " << (config.reflex_recovery ? "on" : "off") << ".\n";
+    }
     bool starts_near_joint_limit = false;
     for (size_t joint = 0; joint < 7; ++joint) {
       starts_near_joint_limit |=
@@ -1418,7 +1492,12 @@ int main(int argc, char** argv) {
     uint64_t tick = 0;
     telemetry::Sample sample;  // Reused every tick; filled and copied into the ring.
     std::cout << "Motion enabled. The input commands a base-frame Cartesian velocity; joint velocities come\n"
-                 "from the onboard IK solver. Desk collision behavior is preserved.\n";
+                 "from the onboard IK solver.\n";
+    bool reengage_required = false;
+    std::vector<double> reflex_times;  // control_elapsed_s at each recovered reflex
+    double session_elapsed_s = 0.0;
+    for (;;) {
+     try {
     robot.control(
         [&](const franka::RobotState& state, franka::Duration period) -> franka::JointVelocities {
           control_elapsed_s += period.toSec();
@@ -1451,10 +1530,15 @@ int main(int argc, char** argv) {
           // RB released = pause: command zero velocity (the S-curve brings the arm
           // smoothly to rest) but keep the session open so RB resumes instantly.
           const bool paused = !input->deadman_pressed();
+          if (paused) {
+            reengage_required = false;  // after a reflex: released once, so the next press moves again
+          }
           std::array<double, 6> target_twist{};
-          const bool motion_enabled = !stopping && !paused && control_elapsed_s >= config.initial_zero_hold_s;
+          const bool motion_enabled = !stopping && !paused && !reengage_required &&
+                                      control_elapsed_s >= config.initial_zero_hold_s;
           if (motion_enabled) {
             target_twist = bounded_velocity(state, config, workspace, *input);
+            limit_contact(target_twist, state, config);
           }
           // 1. Smooth S-curve in Cartesian space.
           const std::array<double, 6> twist = shaper.step(target_twist, config);
@@ -1608,6 +1692,49 @@ int main(int argc, char** argv) {
           return franka::JointVelocities(limited);
         },
         franka::ControllerMode::kJointImpedance, false, franka::kMaxCutoffFrequency);
+      break;
+     } catch (const franka::ControlException& error) {
+      // A reflex (e.g. contact above the collision threshold): report what the robot felt,
+      // recover and keep the session, holding still until the deadman is pressed again.
+      std::cerr << "libfranka error: " << error.what() << '\n';
+      if (!error.log.empty()) {
+        const franka::RobotState& last = error.log.back().state;
+        std::cerr << std::fixed << std::setprecision(1) << "force at the gripper (N): x=" << last.O_F_ext_hat_K[0]
+                  << " y=" << last.O_F_ext_hat_K[1] << " z=" << last.O_F_ext_hat_K[2] << "  joint torques (Nm):";
+        for (const double torque : last.tau_ext_hat_filtered) {
+          std::cerr << ' ' << torque;
+        }
+        std::cerr << '\n' << std::defaultfloat;
+      }
+      session_elapsed_s += control_elapsed_s;
+      reflex_times.erase(std::remove_if(reflex_times.begin(), reflex_times.end(),
+                                        [&](double t) { return session_elapsed_s - t > 60.0; }),
+                         reflex_times.end());
+      reflex_times.push_back(session_elapsed_s);
+      // Only contact reflexes are recovered; anything else (a command the robot rejected) still ends the session.
+      const std::string what = error.what();
+      const bool contact_reflex = what.find("cartesian_reflex") != std::string::npos ||
+                                  what.find("joint_reflex") != std::string::npos;
+      if (!config.reflex_recovery || !contact_reflex || g_stop_requested != 0 || stop_reason.load() != 0 ||
+          reflex_times.size() > 3) {
+        if (reflex_times.size() > 3) {
+          std::cerr << "More than 3 reflexes within 60 s: stopping.\n";
+        }
+        throw;
+      }
+      robot.automaticErrorRecovery();
+      shaper = TwistShaper{};
+      if (home.active) {
+        home.active = false;
+        announce(3);
+      }
+      control_elapsed_s = 0.0;
+      reengage_required = true;
+      std::cout << "Recovered from the reflex; holding still. Release and press the "
+                << (config.input == "quest" ? "grip" : config.input == "policy" ? "policy (new episode)" : "RB")
+                << " again to move." << std::endl;
+     }
+    }
     stop_requested.store(true);
     if (gripper_worker.has_value()) {
       gripper_worker->request_stop();

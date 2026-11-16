@@ -12,6 +12,7 @@ from ament_index_python.packages import get_package_share_directory
 from .config import load_config
 from .episodes import EpisodeStore
 from .node import Recorder
+from .rollouts import RolloutStore
 from .web import make_server
 
 
@@ -35,7 +36,8 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: signal.raise_signal(signal.SIGINT))
     recorder = Recorder(config, store)
     try:
-        server = make_server(recorder, store, args.web_dir, config.http_host, config.http_port)
+        server = make_server(recorder, store, args.web_dir, config.http_host, config.http_port,
+                             RolloutStore(config.rollouts_dir))
     except OSError as exc:
         recorder.get_logger().error('cannot serve the web UI on %s:%d (%s). Is another recorder '
                                     'running? Otherwise change http_port in the config.'

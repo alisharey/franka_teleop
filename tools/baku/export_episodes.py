@@ -36,7 +36,7 @@ lowdim.npz:
     delta_pose           next-frame delta pose for comparison: [dp (3), dr
                          rotation vector (3)] in the base frame, last row 0
 
-    tools/baku/export.sh --out ~/baku_export ~/franka_teleop_data/2026*_episode_00{14,15,16}
+    tools/baku/export.sh --out ~/baku_export data/teleop/*_task1_episode_*
 """
 
 import site

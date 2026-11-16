@@ -18,6 +18,7 @@ class CameraConfig:
 @dataclass
 class RecordingConfig:
     data_dir: Path
+    rollouts_dir: Path = None
     http_host: str = '127.0.0.1'
     http_port: int = 8765
     record_button: int = 4
@@ -46,8 +47,13 @@ def load_config(path) -> RecordingConfig:
         raise ValueError('camera names must be unique identifiers (letters, digits, _): %s' % names)
     if raw.get('bag_storage', 'mcap') not in ('mcap', 'sqlite3'):
         raise ValueError("bag_storage must be 'mcap' or 'sqlite3'")
+    # relative folders are relative to the repository (the folder above config/)
+    root = Path(path).resolve().parent.parent
+    data_dir = root / Path(str(raw.get('data_dir', 'data/teleop'))).expanduser()
+    rollouts_dir = root / Path(str(raw.get('rollouts_dir', 'data/rollouts'))).expanduser()
     return RecordingConfig(
-        data_dir=Path(str(raw.get('data_dir', '~/franka_teleop_data'))).expanduser(),
+        data_dir=data_dir,
+        rollouts_dir=rollouts_dir,
         http_host=str(raw.get('http_host', '127.0.0.1')),
         http_port=int(raw.get('http_port', 8765)),
         record_button=int(raw.get('record_button', 4)),

@@ -7,3 +7,9 @@ third_party/
 vla/baku/.venv/
 vla/baku/runs/
 tools/calibration/.venv/
+tools/click_to_move/.venv/
+tools/click_to_move/curobo/
+paper/
+
+# Recordings and policy runs (record.sh); never committed
+data/

@@ -81,7 +81,14 @@ if [[ $INPUT == policy ]]; then
     exit 1
   fi
   POLICY_LOG="log/policy_$(date +%Y%m%d_%H%M%S).log"
-  setsid vla/baku/.venv/bin/python vla/baku/deploy.py --record "$URL" > "$POLICY_LOG" 2>&1 &
+  # the camera calibration in use goes into every run's rollout.json (vla/baku/upload_rollouts.sh)
+  CALIBRATION="$(python3 -c "import json,os;print(os.path.basename(json.load(open('config/camera_calibration.json'))['session']))" 2> /dev/null || echo unversioned)"
+  # runs go to rollouts_dir, each with its recording moved in from data_dir (both relative to the repository)
+  config_value() { sed -n "s/^$1:[[:space:]]*\([^#]*\).*/\1/p" "$RECORDING_CONFIG" | sed 's/[[:space:]]*$//' | head -n 1; }
+  RECORDINGS="$(config_value data_dir)"
+  ROLLOUTS="$(config_value rollouts_dir)"
+  setsid vla/baku/.venv/bin/python vla/baku/deploy.py --record "$URL" --camera-calibration "$CALIBRATION" \
+    --recordings-dir "${RECORDINGS:-data/teleop}" --out "${ROLLOUTS:-data/rollouts}" > "$POLICY_LOG" 2>&1 &
   POLICY_PID=$!
   echo "Policy server started (log: $POLICY_LOG)."
 fi

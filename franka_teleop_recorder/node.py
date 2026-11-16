@@ -237,7 +237,7 @@ class Recorder(Node):
         super().__init__('episode_recorder')
         self.config = config
         self.store = store
-        self.task = ''
+        self.task = next((e.get('task') or '' for e in store.list()), '')  # the newest episode's task
         self.next_name = ''
         self.last_error = ''
         self.processing = set()
@@ -535,12 +535,14 @@ class Recorder(Node):
                         'bag_backlog': episode.bag.backlog()} if episode else None,
             'task': self.task,
             'next_name': self.next_name,
+            'default_name': self.store.default_name(self.task),
+            'tasks': self.store.tasks(),
             'cameras': cameras,
             'teleop': dict(self._teleop, state_hz=round(state_rate), connected=state_rate > 0),
             'record_button': self.config.record_button,
             'disk_free_gb': round(disk.free / 1e9, 1),
             'data_dir': str(self.store.root),
             'processing': sorted(self.processing),
-            'episodes_version': self.store.version,
+            'episodes_version': self.store.list_version(),
             'last_error': self.last_error,
         }
